@@ -677,6 +677,12 @@ impl GameState {
                 tile.has_route = false;
                 tile.effects.clear();
                 tile._unit_owner_id = None;
+                // Residual identity: these still name the hidden owner and its capital.
+                tile.capital_of = 0;
+                tile.climate = TribeType::Nature;
+                tile.ruling_city_coords = None;
+                tile.had_route = false;
+                tile.skin_type = 0;
             }
         }
 
