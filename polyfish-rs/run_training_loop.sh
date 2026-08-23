@@ -838,6 +838,17 @@ do
                  "games (this reading: $(( GAUGE_GAMES * 2 ))). Trend across readings, not one reading."
         fi
 
+        # The same games read per seed across arena's side swap (audit M3): the
+        # seed is the unit of evidence, so whatever the map handed a seat
+        # cancels inside the pair. rho is what the swap left behind -- negative
+        # means it paid, and `ladder.py power --rho` sizes the next budget on
+        # it. Reported only; no verdict reads it.
+        GAUGE_PAIRED_WR=$(json_get paired_win_rate "" <<< "$VERDICT")
+        if [ -n "$GAUGE_PAIRED_WR" ]; then
+            echo "GAUGE: paired over seeds: ${GAUGE_PAIRED_WR} +/-$(json_get paired_resolves_pp "?" <<< "$VERDICT")pp" \
+                 "(rho $(json_get paired_rho "?" <<< "$VERDICT"); unpaired +/-$(json_get resolves_pp "?" <<< "$VERDICT")pp)"
+        fi
+
         # EXP_ELO_002: first >=50% reading vs the greedy anchor starts
         # the anchor-frac decay clock (EFF_ITER units, matching
         # --anchor-decay-start above).
