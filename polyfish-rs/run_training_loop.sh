@@ -64,12 +64,34 @@ echo "Building binaries..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS: Metal/Accelerate + metal-eval (MPSGraph, auto-preferred) with
     # tch-eval kept as an explicit --eval-backend tch fallback
-    echo "Building with Metal + Accelerate + metal-eval (MPSGraph) + tch-eval for macOS..."
+    # Both accelerated features have prerequisites a stock dev Mac lacks, and
+    # both fail as a linker error a hundred lines deep rather than a message:
+    # metal-eval's Swift bridges need the full Xcode toolchain (Command Line
+    # Tools alone has no swift/macosx runtime), and tch-eval links the venv's
+    # libtorch. Probe both and drop only what is unavailable (#71).
+    MAC_FEATURES="metal,accelerate"
+    if xcrun -f swiftc >/dev/null 2>&1 \
+       && [ -d "$(xcode-select -p 2>/dev/null)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" ]; then
+        MAC_FEATURES="$MAC_FEATURES,metal-eval"
+    else
+        echo "WARNING: no full Xcode Swift toolchain — building without metal-eval," >&2
+        echo "         the fastest Apple backend. Install Xcode and run" >&2
+        echo "         'sudo xcode-select -s /Applications/Xcode.app' to enable it." >&2
+    fi
+    if [ -x .venv/bin/python3 ]; then
+        MAC_FEATURES="$MAC_FEATURES,tch-eval"
+    else
+        echo "WARNING: no .venv — building without tch-eval. Run ./local_setup.sh first." >&2
+    fi
+    echo "Building for macOS with features: $MAC_FEATURES"
     export LIBTORCH_USE_PYTORCH=1
     export LIBTORCH_BYPASS_VERSION_CHECK=1
-    PATH="$(pwd)/.venv/bin:$PATH" cargo build --bin polyfish --bin self_play --bin arena --release --features metal,accelerate,metal-eval,tch-eval
-    # The tch-linked binary has no rpath for libtorch; point dyld at the venv's torch dylibs
-    export DYLD_LIBRARY_PATH="$(.venv/bin/python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+    PATH="$(pwd)/.venv/bin:$PATH" cargo build --bin polyfish --bin self_play --bin arena --release --features "$MAC_FEATURES"
+    # The tch-linked binary has no rpath for libtorch; point dyld at the venv's
+    # torch dylibs. Only meaningful when tch-eval actually went into the build.
+    if [[ "$MAC_FEATURES" == *tch-eval* ]]; then
+        export DYLD_LIBRARY_PATH="$(.venv/bin/python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+    fi
 elif command -v nvcc >/dev/null 2>&1; then
     # CUDA toolkit available; compile CUDA support into the binary.
     # Runtime selection will verify that a usable CUDA device exists.
@@ -217,6 +239,10 @@ CHECKPOINT_EVERY=$(scaled 50)
 MILESTONE_EVERY=$(scaled 100)
 # Replay window: constant ~10*BASELINE_GAMES games regardless of -g.
 # train.py reads REPLAY_BUFFER_FILES; archive pruning keeps window + 1 in sync.
+# SIZING: a games file is ~3GB at -g 64 (measured: 386MB for 8 games at the
+# 45-turn cap), so this window is ~30GB of disk. train.py's TRAIN_CHUNK_FILES
+# also defaults to 10 and holds a chunk in RAM whole — stock settings therefore
+# want ~30GB of RAM at train time. Lower TRAIN_CHUNK_FILES on a smaller box (#71).
 ARCHIVE_KEEP=$(scaled 10)
 export REPLAY_BUFFER_FILES=$ARCHIVE_KEEP
 echo "Schedule (games-based, -g $NUM_GAMES vs baseline $BASELINE_GAMES): $ITERATIONS iterations, checkpoint every $CHECKPOINT_EVERY, milestone every $MILESTONE_EVERY, league every $LEAGUE_INTERVAL iterations, replay window $ARCHIVE_KEEP files"
@@ -259,23 +285,40 @@ fi
 # On a mature model that is ~30 iterations of degenerate data plus 10-turn
 # gauge readings joining the ladder series, all looking like a fresh experiment
 # in the CSV. Refuse to guess which was meant (#37).
+# The no-history arm covers a fresh clone: init_model.py declines to overwrite
+# an existing model.safetensors, so a stray untracked checkpoint is adopted as
+# the starting weights with nothing in the log saying where it came from (#71).
 if [ "$RESET" != true ] && [ "$NEW_RUN_EXPLICIT" != true ] && [ -z "$RESUME_RUN" ] \
-   && [ -f model.safetensors ] && [ -f training_log.csv ] \
-   && [ "$(wc -l < training_log.csv)" -gt 1 ]; then
-    echo "" >&2
-    echo "================================================================" >&2
-    echo " REFUSING TO START: this would be a NEW run on an EXISTING model." >&2
-    echo "" >&2
-    echo " model.safetensors and training_log.csv history are both present," >&2
-    echo " but no --resume was given. A new run rewinds the curriculum, the" >&2
-    echo " heuristic prior, value-trust and anchor-frac to iteration 1 while" >&2
-    echo " keeping the trained weights — ~30 iterations of degenerate data," >&2
-    echo " and short-cap gauge readings joining the ladder series." >&2
-    echo "" >&2
-    echo " Continue the campaign:   ./run_training_loop.sh --resume [run_id]" >&2
-    echo " Deliberately start over: ./run_training_loop.sh --new-run" >&2
-    echo " From scratch (no model): ./run_training_loop.sh --reset" >&2
-    echo "================================================================" >&2
+   && [ -f model.safetensors ]; then
+    if [ -f training_log.csv ] && [ "$(wc -l < training_log.csv)" -gt 1 ]; then
+        echo "" >&2
+        echo "================================================================" >&2
+        echo " REFUSING TO START: this would be a NEW run on an EXISTING model." >&2
+        echo "" >&2
+        echo " model.safetensors and training_log.csv history are both present," >&2
+        echo " but no --resume was given. A new run rewinds the curriculum, the" >&2
+        echo " heuristic prior, value-trust and anchor-frac to iteration 1 while" >&2
+        echo " keeping the trained weights — ~30 iterations of degenerate data," >&2
+        echo " and short-cap gauge readings joining the ladder series." >&2
+        echo "" >&2
+        echo " Continue the campaign:   ./run_training_loop.sh --resume [run_id]" >&2
+        echo " Deliberately start over: ./run_training_loop.sh --new-run" >&2
+        echo " From scratch (no model): ./run_training_loop.sh --reset" >&2
+        echo "================================================================" >&2
+    else
+        echo "" >&2
+        echo "================================================================" >&2
+        echo " REFUSING TO START: model.safetensors exists with NO run history." >&2
+        echo "" >&2
+        echo " init_model.py will not overwrite it, so this run would train" >&2
+        echo " from those weights without a training_log.csv recording where" >&2
+        echo " they came from. On a fresh clone that is usually a leftover" >&2
+        echo " checkpoint, not the model you meant to continue." >&2
+        echo "" >&2
+        echo " Cold start (recommended):  ./run_training_loop.sh --reset" >&2
+        echo " Keep these weights anyway: ./run_training_loop.sh --new-run" >&2
+        echo "================================================================" >&2
+    fi
     exit 1
 fi
 

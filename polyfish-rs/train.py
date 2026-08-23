@@ -573,6 +573,10 @@ def evaluate_value_holdout(model, files, batch_size, spatial_channels, map_size)
 
 def train(batch_size=BATCH_SIZE, epochs=EPOCHS, lr=LEARNING_RATE, chunk_size=None, benchmark_mode=False):
     if chunk_size is None:
+        # Files per chunk, all held in RAM at once (see the loop below). A
+        # self-play file is ~3GB at the loop's -g 64, and run_training_loop.sh
+        # keeps 10 of them, so the default asks for ~30GB. Lower it on a
+        # smaller box rather than shrinking the replay window (#71).
         chunk_size = int(os.environ.get("TRAIN_CHUNK_FILES", "10"))
 
     # The sidecar is this invocation's output and nothing else's. Every path
