@@ -494,11 +494,7 @@ pub fn step_unit(
                 };
 
                 if state.settings._are_you_sure && stomp_damage > 0.0 {
-                    undos.push(crate::memory::note_attacked(
-                        state,
-                        adj_owner,
-                        adj_tile_idx,
-                    ));
+                    undos.push(crate::memory::note_attacked(state, adj_owner, adj_tile_idx));
                 }
 
                 if stomp_damage > 0.0 {
@@ -1115,11 +1111,7 @@ pub fn attack_unit(
                 if let Some(adj_unit_idx) = current_adj_unit_idx {
                     // Fog memory: splashed unit remembers being hit here.
                     if state.settings._are_you_sure && individual_splash_damage > 0.0 {
-                        undos.push(crate::memory::note_attacked(
-                            state,
-                            adj_owner,
-                            adj_idx,
-                        ));
+                        undos.push(crate::memory::note_attacked(state, adj_owner, adj_idx));
                     }
 
                     // Apply Damage
@@ -1403,18 +1395,12 @@ pub fn attack_unit(
 
         // Apply freeze effect if attacker has Freeze skill
         if atk_skills.contains(&SkillType::Freeze) {
-            if let Some(tribe) = state.tribes.get_mut(&defender_owner) {
-                if let Some(unit) = tribe.units.get_mut(defender_idx) {
-                    unit.effects.insert(UnitEffect::Frozen);
-                }
-            }
-            undos.push(Box::new(move |s| {
-                if let Some(tribe) = s.tribes.get_mut(&defender_owner) {
-                    if let Some(unit) = tribe.units.get_mut(defender_idx) {
-                        unit.effects.remove(&UnitEffect::Frozen);
-                    }
-                }
-            }));
+            undos.push(crate::actions::try_add_effect(
+                state,
+                defender_owner,
+                defender_idx,
+                UnitEffect::Frozen,
+            ));
         }
     }
 
