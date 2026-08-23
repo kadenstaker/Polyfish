@@ -111,7 +111,10 @@ pub fn destroy_structure(state: &mut GameState, idx: i32) -> UndoCallback {
         None => return Box::new(|_| {}),
     };
 
-    // Remove structure
+    // Remove structure. Keep its slot so undo can restore iteration order:
+    // several rules (temple growth, fungi, sanctuary spawns) walk this map in
+    // order, so a re-appended entry makes an undone state behave differently.
+    let structure_pos = state.structures.get_index_of(&idx);
     state.structures.shift_remove(&idx);
 
     let mut undos: Vec<UndoCallback> = Vec::new();
@@ -133,8 +136,15 @@ pub fn destroy_structure(state: &mut GameState, idx: i32) -> UndoCallback {
 
     // Restore structure on undo
     let undo_structure = structure.clone();
-    undos.push(Box::new(move |s: &mut GameState| {
-        s.structures.insert(idx, Some(undo_structure.clone()));
+    undos.push(Box::new(move |s: &mut GameState| match structure_pos {
+        Some(pos) => {
+            let pos = pos.min(s.structures.len());
+            s.structures
+                .shift_insert(pos, idx, Some(undo_structure.clone()));
+        }
+        None => {
+            s.structures.insert(idx, Some(undo_structure.clone()));
+        }
     }));
 
     // Handle population reduction for city structures
