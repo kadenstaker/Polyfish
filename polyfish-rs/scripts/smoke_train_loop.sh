@@ -34,7 +34,7 @@ if [ ! -x "$SMOKE_VENV/bin/python3" ]; then
 fi
 
 echo "smoke: staging $REPO -> $SMOKE_DIR"
-rm -rf "$SMOKE_DIR"
+rm -rf "$SMOKE_DIR" "$SMOKE_DIR-backup"
 mkdir -p "$SMOKE_DIR" "$SMOKE_CARGO_DIR"
 tar -C "$REPO" -cf - \
     --exclude=./target --exclude=./.venv --exclude=./.git \
@@ -65,6 +65,10 @@ export CARGO_PROFILE_RELEASE_DEBUG=false
 export CARGO_PROFILE_RELEASE_OPT_LEVEL=1
 # Keep the gauge match to a single seed pair; the default 32 is a real reading.
 export GAUGE_GAMES="${GAUGE_GAMES:-1}"
+# #23: the off-box snapshot rides the checkpoint cadence, which a 1-iteration
+# run never reaches, so the loop's exit-trap snapshot is the branch under test
+# here, and it is the one that has to work when a campaign aborts.
+export POLYFISH_BACKUP_DIR="$SMOKE_DIR-backup"
 # #35: at the production freeze bar (Wilson lower bound >= 0.80) no reading this
 # smoke can afford could ever reach the anchor-freeze branch, and the audit block
 # only fires every 5th gauge — so `ladder.py freeze` and `audit-opponents` had
@@ -193,6 +197,18 @@ if problems:
     print("smoke: ladder freeze/audit branch: " + "; ".join(problems), file=sys.stderr)
     sys.exit(1)
 LADDER_ASSERTS
+fi
+
+# #23: the experiment record has to leave this disk. The snapshot is deliberately
+# non-fatal in the loop, so nothing but this notices when it stops running.
+BACKUP_DIR="$SMOKE_DIR-backup"
+[ -s "$BACKUP_DIR/LATEST" ] || fail "the loop took no off-box snapshot of the record"
+SNAP="$BACKUP_DIR/$(cat "$BACKUP_DIR/LATEST")"
+[ -d "$SNAP" ] || fail "LATEST names a snapshot that is not there: $SNAP"
+grep -q '^status=complete$' "$SNAP/MANIFEST" || fail "snapshot $SNAP is not complete"
+[ -s "$SNAP/training_log.csv" ] || fail "snapshot $SNAP is missing training_log.csv"
+if [ "$LEAGUE" -gt 0 ]; then
+    [ -s "$SNAP/ladder.json" ] || fail "snapshot $SNAP is missing ladder.json"
 fi
 
 echo "smoke: OK (artifacts in $SMOKE_DIR)"

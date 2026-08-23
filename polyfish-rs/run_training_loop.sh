@@ -247,6 +247,39 @@ ARCHIVE_KEEP=$(scaled 10)
 export REPLAY_BUFFER_FILES=$ARCHIVE_KEEP
 echo "Schedule (games-based, -g $NUM_GAMES vs baseline $BASELINE_GAMES): $ITERATIONS iterations, checkpoint every $CHECKPOINT_EVERY, milestone every $MILESTONE_EVERY, league every $LEAGUE_INTERVAL iterations, replay window $ARCHIVE_KEEP files"
 
+# Off-box durability for the experiment record: training_log.csv, ladder.json
+# and checkpoints/ are the only record of a campaign that a rerun cannot
+# reproduce, and without POLYFISH_BACKUP_DIR they live on this disk alone.
+# Snapshots ride the checkpoint cadence so the second disk always holds a
+# complete restore point - the weights, plus the log and ladder rows that say
+# what those weights scored - and one more is taken on exit, so a run that
+# aborts mid-window still leaves everything since the last snapshot.
+BACKUP_EVERY="${POLYFISH_BACKUP_EVERY:-$CHECKPOINT_EVERY}"
+RECORD_DIRTY=0
+if [ -n "${POLYFISH_BACKUP_DIR:-}" ]; then
+    echo "Backup: snapshotting the experiment record to $POLYFISH_BACKUP_DIR every $BACKUP_EVERY iterations and on exit"
+else
+    echo "WARNING: POLYFISH_BACKUP_DIR is unset - the experiment record will live on this disk only." >&2
+    echo "         Point it at another disk/volume to snapshot training_log.csv, ladder.json and" >&2
+    echo "         checkpoints/ (see scripts/backup_experiment_record.sh --help)." >&2
+fi
+
+# Deliberately never fatal: an unreachable or full backup target must not end a
+# campaign that is otherwise healthy, so a failure is reported loudly on stderr
+# and the run continues. Exit 3 means the snapshot published but an item looked
+# suspect, so the record IS on the second disk.
+snapshot_record () {
+    [ -n "${POLYFISH_BACKUP_DIR:-}" ] || return 0
+    local status=0
+    ./scripts/backup_experiment_record.sh "$POLYFISH_BACKUP_DIR" || status=$?
+    case "$status" in
+        0) RECORD_DIRTY=0 ;;
+        3) RECORD_DIRTY=0
+           echo "BACKUP: snapshot published with suspect items ($1); see its MANIFEST." >&2 ;;
+        *) echo "BACKUP: snapshot failed (exit $status, $1) - the experiment record is still on one disk." >&2 ;;
+    esac
+}
+
 REWARD_FLAG=""
 if [ "$REWARD_SHAPING" = true ]; then
     REWARD_FLAG="--reward-shaping"
@@ -372,6 +405,9 @@ fi
 
 cleanup() {
     .venv/bin/python3 training_log.py finish-run 2>/dev/null || true
+    if [ "${RECORD_DIRTY:-0}" = 1 ]; then
+        snapshot_record "run exit"
+    fi
     if [ -n "${SERVER_PID:-}" ]; then
         kill "$SERVER_PID" 2>/dev/null || true
     fi
@@ -429,6 +465,7 @@ fi
 for ((i=START_ITER; i<START_ITER+ITERATIONS; i++))
 do
     ITER_STARTED_AT=$(.venv/bin/python3 training_log.py now-iso)
+    RECORD_DIRTY=1
     echo "=================================================="
     echo "Starting Iteration $i"
     echo "=================================================="
@@ -893,6 +930,12 @@ do
         fi
         refit_elo
         rm -f "$GAUGE_LOG"
+    fi
+
+    # 7. Off-box snapshot. Last in the iteration, so it holds this iteration's
+    # checkpoint together with the log row and gauge reading that grade it.
+    if [ "$BACKUP_EVERY" -gt 0 ] && [ $((i % BACKUP_EVERY)) -eq 0 ]; then
+        snapshot_record "iteration $i"
     fi
 
 done
