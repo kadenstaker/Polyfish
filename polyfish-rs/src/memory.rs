@@ -100,18 +100,22 @@ pub fn note_unit_removed(state: &mut GameState, tile_idx: i32) -> UndoCallback {
         .get(&tile_idx)
         .map(|t| t.explorers.iter().cloned().collect())
         .unwrap_or_default();
-    let mut removed: Vec<(PlayerId, MemUnit)> = Vec::new();
+    // Each ghost's slot travels with it: restoring by plain insert would
+    // re-append it and leave an undone state iterating differently.
+    let mut removed: Vec<(PlayerId, usize, MemUnit)> = Vec::new();
     for w in witnesses {
         if let Some(tribe) = state.tribes.get_mut(&w) {
+            let pos = tribe.memory_units.get_index_of(&tile_idx);
             if let Some(ghost) = tribe.memory_units.shift_remove(&tile_idx) {
-                removed.push((w, ghost));
+                removed.push((w, pos.unwrap_or(tribe.memory_units.len()), ghost));
             }
         }
     }
     Box::new(move |s: &mut GameState| {
-        for (w, ghost) in removed {
+        for (w, pos, ghost) in removed {
             if let Some(t) = s.tribes.get_mut(&w) {
-                t.memory_units.insert(tile_idx, ghost);
+                t.memory_units
+                    .shift_insert(pos.min(t.memory_units.len()), tile_idx, ghost);
             }
         }
     })

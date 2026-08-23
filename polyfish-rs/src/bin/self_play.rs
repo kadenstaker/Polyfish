@@ -380,6 +380,12 @@ struct GameResult {
     winner_id: i32,
     /// Ended by elimination rather than score adjudication.
     decisive: bool,
+    /// Largest `|tribe.score - calculate_detailed_tribe_score|` across the
+    /// living tribes at game end (#40). Score is the reward/value currency, so
+    /// the incremental counter drifting from the canonical recompute biases
+    /// every TD label built from it; a dead tribe's score is frozen by design
+    /// and is not compared.
+    score_drift: i32,
     /// Seat (player id) the greedy anchor occupied; None for non-anchor games.
     anchor_seat: Option<i32>,
     recap: Replay,
@@ -1007,9 +1013,15 @@ fn play_single_game(
     // If the game timed out (safety cap), use score as tiebreaker.
     let mut scores: HashMap<i32, i32> = HashMap::new();
     let mut alive: HashMap<i32, bool> = HashMap::new();
+    let mut score_drift = 0i32;
     for (id, t) in &game.state.tribes {
         scores.insert(*id, t.score);
-        alive.insert(*id, t.killed_turn <= 0 && t.resigned_turn <= 0);
+        let is_alive = t.killed_turn <= 0 && t.resigned_turn <= 0;
+        alive.insert(*id, is_alive);
+        if is_alive {
+            let canonical = polyfish::functions::calculate_detailed_tribe_score(&game.state, *id);
+            score_drift = score_drift.max((t.score - canonical).abs());
+        }
     }
 
     // Domination winner: the sole survivor, or highest score if timeout
@@ -1130,6 +1142,7 @@ fn play_single_game(
         winner_score,
         winner_id,
         decisive: is_decisive,
+        score_drift,
         policy_kl: (kl_n > 0).then(|| kl_sum / kl_n as f32),
         anchor_seat: match (
             backend1 == SearchBackend::Greedy,
@@ -2083,6 +2096,11 @@ fn main() -> anyhow::Result<()> {
     let mut anchor_games_n = 0usize;
     let mut anchor_model_wins = 0.0f32;
 
+    // #40 score-parity probe, aggregated across games.
+    let mut score_drift_max = 0i32;
+    let mut score_drift_sum: i64 = 0;
+    let mut score_drift_games = 0usize;
+
     // EXP_ARCH_001 drowning meter: absolute contribution of each value-label
     // term, summed over every step, so the logs show how much of the signal is
     // genuine win/loss vs dense score-shaping.
@@ -2125,6 +2143,11 @@ fn main() -> anyhow::Result<()> {
     for result in results {
         if result.decisive {
             decisive_games += 1;
+        }
+        score_drift_max = score_drift_max.max(result.score_drift);
+        score_drift_sum += result.score_drift as i64;
+        if result.score_drift != 0 {
+            score_drift_games += 1;
         }
         if let Some(anchor_pid) = result.anchor_seat {
             anchor_games_n += 1;
@@ -2535,6 +2558,13 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
+    if score_drift_max > 0 {
+        eprintln!(
+            "[Self-Play] WARNING: score parity drift — max {score_drift_max}, {score_drift_games}/{} games (incremental tribe.score vs the canonical recompute; TD labels are built from the incremental one)",
+            args.num_games
+        );
+    }
+
     let metrics = json!({
         "num_games": args.num_games,
         "avg_score": avg_score,
@@ -2577,6 +2607,9 @@ fn main() -> anyhow::Result<()> {
         "anchor_games": anchor_games_n,
         "anchor_model_wins": anchor_model_wins,
         "aborted_games": aborted_games_n,
+        "score_drift_max": score_drift_max,
+        "score_drift_mean": (score_drift_sum as f64 / args.num_games.max(1) as f64) as f32,
+        "score_drift_frac": score_drift_games as f32 / args.num_games.max(1) as f32,
         "games_file": games_file,
         "moves_by_turn": moves_by_turn,
     });

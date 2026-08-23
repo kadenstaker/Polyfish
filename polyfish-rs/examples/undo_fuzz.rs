@@ -6,9 +6,15 @@
 //! the pre-descent snapshot; the first mismatch prints the offending move
 //! sequence and the differing JSON paths, then exits non-zero.
 //!
+//! The JSON comparison is order-blind (`serde_json` sorts object keys), so an
+//! `IndexMap` entry that undo re-appended instead of restoring to its slot
+//! compares equal. Every state therefore also carries an `order_fingerprint`,
+//! which is compared the same way (#50).
+//!
 //! Usage: cargo run --release --example undo_fuzz -- [num_seeds] [start_seed] [max_depth]
 
 use polyfish::game::Game;
+use polyfish::states::GameState;
 use polyfish::types::TribeType;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -63,6 +69,46 @@ fn json_diff(prefix: String, a: &Value, b: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Key order of every `IndexMap` in the state, one map per line. Iteration
+/// order is load-bearing — temple growth, fungi spread, sanctuary spawns and
+/// mycelium heal caps all walk these in order, and unit spawn order feeds
+/// movegen order.
+fn order_fingerprint(state: &GameState) -> Vec<String> {
+    let join = |keys: Vec<String>| keys.join(",");
+    let ints = |keys: Vec<i32>| join(keys.into_iter().map(|k| k.to_string()).collect());
+
+    let mut lines = vec![
+        format!("tiles: {}", ints(state.tiles.keys().copied().collect())),
+        format!(
+            "structures: {}",
+            ints(state.structures.keys().copied().collect())
+        ),
+        format!(
+            "resources: {}",
+            ints(state.resources.keys().copied().collect())
+        ),
+        format!("tribes: {}", ints(state.tribes.keys().copied().collect())),
+    ];
+    for (id, tribe) in &state.tribes {
+        lines.push(format!(
+            "tribe {} relations: {}",
+            id,
+            ints(tribe.relations.keys().copied().collect())
+        ));
+        lines.push(format!(
+            "tribe {} memory_units: {}",
+            id,
+            ints(tribe.memory_units.keys().copied().collect())
+        ));
+        lines.push(format!(
+            "tribe {} memory_attacks: {}",
+            id,
+            ints(tribe.memory_attacks.keys().copied().collect())
+        ));
+    }
+    lines
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let num_seeds: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(50);
@@ -100,8 +146,10 @@ fn main() {
             // Snapshot before every simulated move so a mismatch can be
             // pinned to the exact move whose undo failed to restore state.
             for _ in 0..4 {
-                let mut snapshots: Vec<Value> =
-                    vec![serde_json::to_value(&game.state).expect("serialize state")];
+                let mut snapshots: Vec<(Value, Vec<String>)> = vec![(
+                    serde_json::to_value(&game.state).expect("serialize state"),
+                    order_fingerprint(&game.state),
+                )];
                 let mut undos = Vec::new();
                 let mut seq: Vec<String> = Vec::new();
 
@@ -120,8 +168,10 @@ fn main() {
                         Some(u) => {
                             seq.push(desc);
                             undos.push(u);
-                            snapshots
-                                .push(serde_json::to_value(&game.state).expect("serialize state"));
+                            snapshots.push((
+                                serde_json::to_value(&game.state).expect("serialize state"),
+                                order_fingerprint(&game.state),
+                            ));
                         }
                         None => {
                             println!("SIMULATE FAILED (legal move rejected)");
@@ -138,12 +188,18 @@ fn main() {
                 while let Some(u) = undos.pop() {
                     u(&mut game.state);
                     snapshots.pop();
-                    let expected = snapshots.last().expect("snapshot underflow");
+                    let (expected, expected_order) = snapshots.last().expect("snapshot underflow");
                     let restored = serde_json::to_value(&game.state).expect("serialize state");
-                    if expected != &restored {
+                    let restored_order = order_fingerprint(&game.state);
+                    if expected != &restored || expected_order != &restored_order {
                         let bad_idx = undos.len();
                         let mut diffs = Vec::new();
                         json_diff(String::new(), expected, &restored, &mut diffs);
+                        for (want, got) in expected_order.iter().zip(restored_order.iter()) {
+                            if want != got && diffs.len() < 20 {
+                                diffs.push(format!("iteration order: {} -> {}", want, got));
+                            }
+                        }
                         println!("UNDO MISMATCH");
                         println!("  seed: {}  (tribes {:?} vs {:?})", seed, t1, t2);
                         println!("  after real move #{}", real_moves);

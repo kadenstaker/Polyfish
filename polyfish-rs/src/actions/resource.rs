@@ -32,7 +32,9 @@ pub fn consume_resource(
         }
     };
 
-    // Remove or replace
+    // Remove or replace. The slot index is captured up front so undo restores
+    // iteration order rather than re-appending the entry.
+    let old_pos = state.resources.get_index_of(&tile_idx);
     if let Some(rt) = replace_type {
         if rt == ResourceType::None {
             state.resources.shift_remove(&tile_idx);
@@ -47,7 +49,15 @@ pub fn consume_resource(
 
     Box::new(move |s| {
         // Restore old resource
-        s.resources.insert(tile_idx, old_resource);
+        match old_pos {
+            Some(pos) if !s.resources.contains_key(&tile_idx) => {
+                s.resources
+                    .shift_insert(pos.min(s.resources.len()), tile_idx, old_resource);
+            }
+            _ => {
+                s.resources.insert(tile_idx, old_resource);
+            }
+        }
     })
 }
 
