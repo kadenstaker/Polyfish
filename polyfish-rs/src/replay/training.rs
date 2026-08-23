@@ -16,7 +16,7 @@ use strum::IntoEnumIterator;
 use super::{
     ACTION_SCHEMA_VERSION, DATASET_SCHEMA_VERSION, FEATURE_SCHEMA_VERSION, REPLAY_SCHEMA_VERSION,
     Replay, ReplayCommand, ReplayError, ReplayMoveContext, ReplayObserver, ReplayResult,
-    derive_result, validate_training_eligibility,
+    derive_result, validate_training_eligibility_with,
 };
 
 struct PendingSample {
@@ -35,7 +35,12 @@ pub struct TrainingCollector {
 
 impl TrainingCollector {
     pub fn new(replay: &Replay) -> Result<Self, ReplayError> {
-        validate_training_eligibility(replay)?;
+        Self::new_with(replay, false)
+    }
+
+    /// `allow_version_drift` is forwarded to `validate_training_eligibility_with`.
+    pub fn new_with(replay: &Replay, allow_version_drift: bool) -> Result<Self, ReplayError> {
+        validate_training_eligibility_with(replay, allow_version_drift)?;
         Ok(Self {
             samples: Vec::new(),
         })

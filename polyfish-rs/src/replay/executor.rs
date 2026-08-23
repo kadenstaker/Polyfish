@@ -100,6 +100,7 @@ impl ReplayExecutor {
             return Err(ReplayError::IllegalCommand {
                 context: context.clone(),
                 command: command.clone(),
+                game_version: game.state.settings.version,
                 legal_move_summaries: legal_moves
                     .iter()
                     .take(40)
@@ -111,6 +112,7 @@ impl ReplayExecutor {
             return Err(ReplayError::AmbiguousCommand {
                 context: context.clone(),
                 command: command.clone(),
+                game_version: game.state.settings.version,
                 matching_move_summaries: matches
                     .iter()
                     .map(|&i| {

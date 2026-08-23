@@ -47,19 +47,21 @@ pub enum ReplayError {
     #[error("replay validation failed{file}: {message}")]
     Validation { file: String, message: String },
     #[error(
-        "illegal replay command at {context}: {command:?}; legal moves: {legal_move_summaries:?}"
+        "illegal replay command at {context} (game version {game_version}): {command:?}; legal moves: {legal_move_summaries:?}"
     )]
     IllegalCommand {
         context: ReplayMoveContext,
         command: ReplayCommand,
+        game_version: i32,
         legal_move_summaries: Vec<String>,
     },
     #[error(
-        "ambiguous replay command at {context}: {command:?}; matching legal moves: {matching_move_summaries:?}"
+        "ambiguous replay command at {context} (game version {game_version}): {command:?}; matching legal moves: {matching_move_summaries:?}"
     )]
     AmbiguousCommand {
         context: ReplayMoveContext,
         command: ReplayCommand,
+        game_version: i32,
         matching_move_summaries: Vec<String>,
     },
     #[error("active player mismatch at {context}: replay declares {declared}, engine has {actual}")]
@@ -83,6 +85,16 @@ pub enum ReplayError {
     CommandConversion {
         move_summary: String,
         message: String,
+    },
+    #[error(
+        "engine diverged from the source game at {context}: player {player_id} {field} is {actual}, source recorded {expected}"
+    )]
+    SourceDivergence {
+        context: ReplayMoveContext,
+        player_id: PlayerId,
+        field: &'static str,
+        expected: i64,
+        actual: i64,
     },
     #[error("replay is not eligible for training: {message}")]
     TrainingIneligible { message: String },

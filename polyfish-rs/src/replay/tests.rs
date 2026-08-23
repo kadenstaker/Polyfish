@@ -387,3 +387,108 @@ fn finish_still_refuses_a_result_less_unfinished_replay() {
         "unexpected error: {error}"
     );
 }
+
+#[test]
+fn reports_the_game_version_and_gates_one_outside_the_supported_range() {
+    let replay = replay_with(vec![ReplayCommand::EndTurn]);
+    let eligibility = validate_training_eligibility(&replay).unwrap();
+    assert_eq!(eligibility.game_version, 115);
+    assert_eq!(eligibility.version_support, VersionSupport::Supported);
+
+    let mut ancient = replay_with(vec![ReplayCommand::EndTurn]);
+    ancient.initial_state.settings.version = MIN_SUPPORTED_GAME_VERSION - 1;
+    let error = validate_training_eligibility(&ancient)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&format!("game version {}", MIN_SUPPORTED_GAME_VERSION - 1))
+            && error.contains(&format!(
+                "{MIN_SUPPORTED_GAME_VERSION}..={MAX_SUPPORTED_GAME_VERSION}"
+            )),
+        "unexpected error: {error}"
+    );
+
+    let mut future = replay_with(vec![ReplayCommand::EndTurn]);
+    future.initial_state.settings.version = MAX_SUPPORTED_GAME_VERSION + 4;
+    assert!(validate_training_eligibility(&future).is_err());
+    assert!(crate::replay::training::TrainingCollector::new(&future).is_err());
+
+    let eligibility = validate_training_eligibility_with(&future, true).unwrap();
+    assert_eq!(eligibility.version_support, VersionSupport::TooNew);
+    assert!(crate::replay::training::TrainingCollector::new_with(&future, true).is_ok());
+}
+
+#[test]
+fn illegal_command_error_carries_the_game_version() {
+    let replay = replay_with(vec![ReplayCommand::Step {
+        source: 0,
+        target: 0,
+    }]);
+    assert!(matches!(
+        ReplayExecutor::execute(&replay).unwrap_err(),
+        ReplayError::IllegalCommand {
+            game_version: 115,
+            ..
+        }
+    ));
+}
+
+/// Reads the checkpoint off the engine's own post-load state, which is what
+/// `before_move` compares against.
+fn checkpoint_for(replay: &Replay, player_id: crate::states::PlayerId) -> SourceCheckpoint {
+    let game = ReplayExecutor::initialize(replay).unwrap();
+    let tribe = &game.state.tribes[&player_id];
+    SourceCheckpoint {
+        turn_number: replay.turns[0].turn_number,
+        player_id,
+        score: tribe.score,
+        stars: tribe.stars,
+        unit_count: tribe.units.len(),
+    }
+}
+
+#[test]
+fn verifier_is_inert_without_diagnostics_and_catches_a_diverged_star_count() {
+    let replay = replay_with(vec![ReplayCommand::EndTurn]);
+    let mut inert = DivergenceVerifier::new(replay.metadata.end_turn_checkpoints().unwrap());
+    assert!(inert.is_inert());
+    ReplayExecutor::execute_with_observer(&replay, &mut inert).unwrap();
+
+    let mut replay = replay_with(vec![ReplayCommand::EndTurn]);
+    let checkpoint = checkpoint_for(&replay, 1);
+    replay.metadata.source_diagnostics = Some(serde_json::json!({
+        "endTurnCheckpoints": [checkpoint],
+        "someUnknownSourceKey": 7,
+    }));
+    let mut verifier = DivergenceVerifier::new(replay.metadata.end_turn_checkpoints().unwrap());
+    assert!(!verifier.is_inert());
+    ReplayExecutor::execute_with_observer(&replay, &mut verifier).unwrap();
+    assert!(verifier.score_notes().is_empty());
+
+    let mut drifted = checkpoint;
+    drifted.score += 5;
+    replay.metadata.source_diagnostics =
+        Some(serde_json::json!({ "endTurnCheckpoints": [drifted] }));
+    let mut verifier = DivergenceVerifier::new(replay.metadata.end_turn_checkpoints().unwrap());
+    ReplayExecutor::execute_with_observer(&replay, &mut verifier).unwrap();
+    assert_eq!(verifier.score_notes().len(), 1);
+
+    let mut drifted = checkpoint;
+    drifted.stars += 1;
+    replay.metadata.source_diagnostics =
+        Some(serde_json::json!({ "endTurnCheckpoints": [drifted] }));
+    let mut verifier = DivergenceVerifier::new(replay.metadata.end_turn_checkpoints().unwrap());
+    let error = ReplayExecutor::execute_with_observer(&replay, &mut verifier).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ReplayError::SourceDivergence {
+                field: "stars",
+                player_id: 1,
+                ..
+            }
+        ),
+        "unexpected error: {error}"
+    );
+    assert!(error.to_string().contains("source recorded"));
+}

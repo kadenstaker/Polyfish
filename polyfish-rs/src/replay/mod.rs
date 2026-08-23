@@ -14,6 +14,7 @@ pub mod recorder;
 pub mod schema;
 pub mod training;
 pub mod validator;
+pub mod verify;
 
 pub use command::ReplayCommand;
 pub use errors::{ReplayError, ReplayMoveContext};
@@ -27,7 +28,12 @@ pub use paths::{
 pub use playback::ReplayPlayback;
 pub use recorder::ReplayRecorder;
 pub use schema::*;
-pub use validator::{TrainingEligibility, validate_replay, validate_training_eligibility};
+pub use validator::{
+    MAX_SUPPORTED_GAME_VERSION, MIN_SUPPORTED_GAME_VERSION, TrainingEligibility, VersionSupport,
+    classify_game_version, validate_replay, validate_training_eligibility,
+    validate_training_eligibility_with,
+};
+pub use verify::{DivergenceVerifier, PairObserver};
 
 pub const REPLAY_SCHEMA_VERSION: u32 = 1;
 pub const DATASET_SCHEMA_VERSION: u32 = 1;

@@ -1,13 +1,39 @@
 use crate::ai::features;
+use crate::version_sync::{CURRENT_VERSION, GameVersion};
 use std::collections::HashSet;
 use std::path::Path;
 
 use super::{REPLAY_SCHEMA_VERSION, Replay, ReplayError};
 
+/// Oldest ruleset the engine still carries version branches for.
+pub const MIN_SUPPORTED_GAME_VERSION: i32 = GameVersion::AquarionRework as i32;
+/// Newest ruleset the engine implements. A capture beyond it was played under
+/// rules Polyfish does not have, so its states are re-derived wrongly.
+pub const MAX_SUPPORTED_GAME_VERSION: i32 = CURRENT_VERSION;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionSupport {
+    Supported,
+    TooOld,
+    TooNew,
+}
+
+pub fn classify_game_version(version: i32) -> VersionSupport {
+    if version < MIN_SUPPORTED_GAME_VERSION {
+        VersionSupport::TooOld
+    } else if version > MAX_SUPPORTED_GAME_VERSION {
+        VersionSupport::TooNew
+    } else {
+        VersionSupport::Supported
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrainingEligibility {
     pub map_width: usize,
     pub map_height: usize,
+    pub game_version: i32,
+    pub version_support: VersionSupport,
 }
 
 pub fn validate_replay(replay: &Replay, file: Option<&Path>) -> Result<(), ReplayError> {
@@ -240,6 +266,15 @@ pub fn validate_replay(replay: &Replay, file: Option<&Path>) -> Result<(), Repla
 }
 
 pub fn validate_training_eligibility(replay: &Replay) -> Result<TrainingEligibility, ReplayError> {
+    validate_training_eligibility_with(replay, false)
+}
+
+/// `allow_version_drift` downgrades an unsupported ruleset from a refusal to a
+/// `version_support` the caller can report.
+pub fn validate_training_eligibility_with(
+    replay: &Replay,
+    allow_version_drift: bool,
+) -> Result<TrainingEligibility, ReplayError> {
     let width = replay.metadata.map_width;
     let height = replay.metadata.map_height;
     if width != features::MAP_SIZE || height != features::MAP_SIZE {
@@ -251,8 +286,19 @@ pub fn validate_training_eligibility(replay: &Replay) -> Result<TrainingEligibil
             ),
         });
     }
+    let game_version = replay.initial_state.settings.version;
+    let version_support = classify_game_version(game_version);
+    if version_support != VersionSupport::Supported && !allow_version_drift {
+        return Err(ReplayError::TrainingIneligible {
+            message: format!(
+                "Replay was captured under game version {game_version}, outside the supported range {MIN_SUPPORTED_GAME_VERSION}..={MAX_SUPPORTED_GAME_VERSION}. Rules that changed outside that range are re-derived wrongly here, so every exported sample would be mislabelled; pass --allow-version-drift to import it anyway."
+            ),
+        });
+    }
     Ok(TrainingEligibility {
         map_width: width,
         map_height: height,
+        game_version,
+        version_support,
     })
 }
