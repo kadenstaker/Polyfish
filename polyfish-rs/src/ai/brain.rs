@@ -293,26 +293,6 @@ impl<'a> Brain<'a> {
         self
     }
 
-    fn _get_iterations(&self, turn: i32, legal_move_count: usize) -> usize {
-        let mut iterations = self.max_iterations;
-
-        if legal_move_count == 1 {
-            return 0;
-        }
-
-        if legal_move_count < 4 {
-            iterations = 10;
-        } else if turn < 3 || legal_move_count < 10 {
-            iterations = 25;
-        } else if turn < 6 || legal_move_count < 20 {
-            iterations = 50;
-        } else if turn < 10 || legal_move_count < 30 {
-            iterations = 80;
-        }
-
-        iterations
-    }
-
     /// Build the concrete agent once and reuse it across calls so the agent
     /// can carry its MCTS tree between consecutive same-player searches.
     /// Returns `None` when there is exactly one legal move (no search needed).
@@ -361,7 +341,10 @@ impl<'a> Brain<'a> {
         if want_trace {
             agent.arm_trace();
         }
-        agent.select_move_with_decomposed_visits(&mut game.clone_for_mcts(game.current_player_id()), move_count)
+        agent.select_move_with_decomposed_visits(
+            &mut game.clone_for_mcts(game.current_player_id()),
+            move_count,
+        )
     }
 
     /// Request that the next `think_decomposed` call capture a decision

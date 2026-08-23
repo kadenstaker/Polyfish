@@ -10,17 +10,15 @@ pub mod gumbel_mcts;
 pub mod gumbel_qtransform;
 pub mod heuristic_mcts;
 pub mod mapper;
-pub mod mcts;
 pub mod mcts_common;
 pub mod mcts_types;
 pub mod mcts_zero;
-pub mod network;
-#[cfg(feature = "tch-eval")]
-pub mod tch_network;
 #[cfg(feature = "metal-eval")]
 pub mod metal_network;
-pub mod scoring;
+pub mod network;
 pub mod policy_composer;
 pub mod reward;
+pub mod scoring;
+#[cfg(feature = "tch-eval")]
+pub mod tch_network;
 pub use evaluator::evaluate_state;
-pub use mcts::{MctsAgent, MctsAnalysis, MoveEvaluation};
