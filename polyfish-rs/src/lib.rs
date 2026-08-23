@@ -19,6 +19,7 @@ pub mod recorder;
 pub mod replay;
 pub mod score;
 pub mod settings;
+pub mod state_fingerprint;
 pub mod states;
 pub mod supabase;
 pub mod training_api;

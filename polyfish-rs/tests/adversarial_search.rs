@@ -7,27 +7,9 @@ use polyfish::game::{Game, adversarial_search, set_adversarial_search};
 use polyfish::mapgen::{MapGenSettings, generate};
 use polyfish::types::{MapSize, MapType, MoveType, TerrainType, TribeType};
 use std::collections::HashSet;
-use std::sync::{Mutex, MutexGuard};
 
-/// The adversarial switch is process-wide, so mode-sensitive tests must not
-/// run concurrently. Every such test holds this for its whole body.
-static MODE: Mutex<()> = Mutex::new(());
-
-struct ModeGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
-
-impl ModeGuard {
-    fn set(on: bool) -> Self {
-        let g = MODE.lock().unwrap_or_else(|e| e.into_inner());
-        set_adversarial_search(on);
-        Self(g)
-    }
-}
-
-impl Drop for ModeGuard {
-    fn drop(&mut self) {
-        set_adversarial_search(false);
-    }
-}
+mod common;
+use common::AdversarialModeGuard as ModeGuard;
 
 fn make_game(seed: i64) -> Game {
     let mut game = Game::new();
@@ -186,7 +168,10 @@ fn max_turns_ahead_uses_its_argument() {
     for t in 0..60 {
         for &m in &[10, 20, 45, 100] {
             let h = max_turns_ahead(t, m);
-            assert!(h >= MIN_TURNS_AHEAD, "horizon {h} below floor at t={t} m={m}");
+            assert!(
+                h >= MIN_TURNS_AHEAD,
+                "horizon {h} below floor at t={t} m={m}"
+            );
             assert!(h <= MAX_TURNS_AHEAD, "horizon {h} above cap at t={t} m={m}");
             if m - t >= MIN_TURNS_AHEAD {
                 assert!(h <= m - t, "horizon {h} looks past turn {m} from {t}");
@@ -280,7 +265,10 @@ fn in_tree_opponent_can_threaten_an_undefended_city() {
     // our vision, so the belief-state opponent still owns it.
     let mut view = game.clone_for_mcts(1);
     assert!(
-        view.state.tribes[&2].units.iter().any(|u| u.coords.idx == adjacent),
+        view.state.tribes[&2]
+            .units
+            .iter()
+            .any(|u| u.coords.idx == adjacent),
         "the adjacent enemy must survive fog obscuring"
     );
 
