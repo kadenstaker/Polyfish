@@ -22,8 +22,9 @@ pub const MAP_SIZE: usize = 11;
 // When new variants are added to enums, update these counts accordingly
 // ============================================================================
 
-/// Count of terrain types (TerrainType variants)
-pub const TERRAIN_COUNT: usize = 8; // None, Water, Ocean, Field, Mountain, Forest, Ice, Algae
+/// Count of terrain types. `TerrainType` has 9 variants: Mangrove has no slot
+/// of its own, see `terrain_to_channel`.
+pub const TERRAIN_COUNT: usize = 8; // None, Water, Ocean, Field, Mountain, Forest, Ice, Wetland
 
 /// Count of resource types (ResourceType variants)
 pub const RESOURCE_COUNT: usize = 9; // None, Game, Crop, Fish, Metal, Fruit, Spores, Starfish, AquaCrop
@@ -127,6 +128,20 @@ pub const CH_MEM_ATTACKED_HERE: usize = CH_MEM_START + 5;
 /// Total number of feature channels (dynamically computed)
 pub const NUM_CHANNELS: usize = CH_MEM_END;
 
+// Every trained checkpoint and every archived games_*.safetensors is keyed to
+// these absolute channels; a shifted block silently garbles both.
+const _: () = {
+    assert!(CH_TERRAIN_START == 0);
+    assert!(CH_TILE_FLAGS_START == 8);
+    assert!(CH_RESOURCE_START == 18);
+    assert!(CH_STRUCTURE_START == 27);
+    assert!(CH_UNIT_START == 62);
+    assert!(CH_UNIT_STATS_START == 108);
+    assert!(CH_CITY_STATS_START == 124);
+    assert!(CH_MEM_START == 136);
+    assert!(NUM_CHANNELS == 142);
+};
+
 // ============================================================================
 // Runtime Lookup Tables (enum discriminant -> sequential index)
 // ============================================================================
@@ -170,24 +185,45 @@ static UNIT_INDEX: LazyLock<std::collections::HashMap<UnitType, usize>> = LazyLo
 // Channel Lookup Functions
 // ============================================================================
 
+/// Folds a variant with no slot of its own onto its block's `None` slot.
+/// Widening a `*_COUNT` instead is not an option: `NUM_CHANNELS` is baked into
+/// every checkpoint, and `train.py`'s `pad_spatial` only recovers channels
+/// appended at the end of the layout.
+#[inline]
+fn slot(idx: usize, count: usize) -> usize {
+    if idx < count { idx } else { 0 }
+}
+
 #[inline]
 fn terrain_to_channel(terrain: TerrainType) -> usize {
-    CH_TERRAIN_START + TERRAIN_INDEX.get(&terrain).copied().unwrap_or(0)
+    CH_TERRAIN_START
+        + slot(
+            TERRAIN_INDEX.get(&terrain).copied().unwrap_or(0),
+            TERRAIN_COUNT,
+        )
 }
 
 #[inline]
 fn resource_to_channel(resource: ResourceType) -> usize {
-    CH_RESOURCE_START + RESOURCE_INDEX.get(&resource).copied().unwrap_or(0)
+    CH_RESOURCE_START
+        + slot(
+            RESOURCE_INDEX.get(&resource).copied().unwrap_or(0),
+            RESOURCE_COUNT,
+        )
 }
 
 #[inline]
 fn structure_to_channel(structure: StructureType) -> usize {
-    CH_STRUCTURE_START + STRUCTURE_INDEX.get(&structure).copied().unwrap_or(0)
+    CH_STRUCTURE_START
+        + slot(
+            STRUCTURE_INDEX.get(&structure).copied().unwrap_or(0),
+            STRUCTURE_COUNT,
+        )
 }
 
 #[inline]
 fn unit_to_channel(unit_type: UnitType) -> usize {
-    CH_UNIT_START + UNIT_INDEX.get(&unit_type).copied().unwrap_or(0)
+    CH_UNIT_START + slot(UNIT_INDEX.get(&unit_type).copied().unwrap_or(0), UNIT_COUNT)
 }
 
 // ============================================================================
@@ -277,17 +313,18 @@ pub fn state_to_cpu_features(state: &GameState, perspective: PlayerId) -> Result
     let is_elyrion = pov_tribe_type == TribeType::Elyrion;
 
     // Handle model versioning for normalization scales
-    let (scale_max_turns, scale_max_score, scale_max_stars, scale_max_spt, scale_max_units) = if state.settings.version <= 0 {
-        (30.0, 10000.0, 30.0, 30.0, 20.0) // Legacy scales for v0 models
-    } else {
-        (
-            crate::states::default_max_turns() as f32,
-            crate::states::default_max_score() as f32,
-            crate::states::default_max_stars() as f32,
-            crate::states::default_max_spt() as f32,
-            crate::states::default_max_units() as f32,
-        )
-    };
+    let (scale_max_turns, scale_max_score, scale_max_stars, scale_max_spt, scale_max_units) =
+        if state.settings.version <= 0 {
+            (30.0, 10000.0, 30.0, 30.0, 20.0) // Legacy scales for v0 models
+        } else {
+            (
+                crate::states::default_max_turns() as f32,
+                crate::states::default_max_score() as f32,
+                crate::states::default_max_stars() as f32,
+                crate::states::default_max_spt() as f32,
+                crate::states::default_max_units() as f32,
+            )
+        };
 
     // Global stats (same for all tiles)
     let turn_norm = (state.settings.turn as f32 / state.settings.max_turns as f32).clamp(0.0, 1.0);
@@ -303,9 +340,7 @@ pub fn state_to_cpu_features(state: &GameState, perspective: PlayerId) -> Result
         })
         .unwrap_or(0.0);
     let spt_norm = pov_tribe
-        .map(|t| {
-            (crate::functions::get_tribe_spt(state, t) as f32 / scale_max_spt).clamp(0.0, 1.0)
-        })
+        .map(|t| (crate::functions::get_tribe_spt(state, t) as f32 / scale_max_spt).clamp(0.0, 1.0))
         .unwrap_or(0.0);
     let score_norm = pov_tribe
         .map(|t| (t.score as f32 / scale_max_score).clamp(0.0, 1.0))
@@ -324,7 +359,8 @@ pub fn state_to_cpu_features(state: &GameState, perspective: PlayerId) -> Result
     let game_over = if state.settings._game_over { 1.0 } else { 0.0 };
     let total_cities =
         (pov_tribe.map(|t| t.cities.len()).unwrap_or(0) as f32 / 5.0).clamp(0.0, 1.0);
-    let total_units = (pov_tribe.map(|t| t.units.len()).unwrap_or(0) as f32 / scale_max_units).clamp(0.0, 1.0);
+    let total_units =
+        (pov_tribe.map(|t| t.units.len()).unwrap_or(0) as f32 / scale_max_units).clamp(0.0, 1.0);
     // at turn 5 it stops tracking
     let pacifist_turns = pov_tribe
         .map(|t| (t.pacifist_turns as f32 / 5.0).clamp(0.0, 1.0))
@@ -474,9 +510,7 @@ pub fn state_to_cpu_features(state: &GameState, perspective: PlayerId) -> Result
 
             // Enemy invisible units are hidden from the perspective player.
             // Own units are always visible regardless of Invisible effect.
-            if *player_id != perspective
-                && unit.effects.contains(&UnitEffect::Invisible)
-            {
+            if *player_id != perspective && unit.effects.contains(&UnitEffect::Invisible) {
                 continue;
             }
 
@@ -676,7 +710,13 @@ pub fn state_to_cpu_features(state: &GameState, perspective: PlayerId) -> Result
                     set_feat(&mut data, CH_MEM_ENEMY_SEEN, x, y, decay);
                     set_feat(&mut data, CH_MEM_ENEMY_HP, x, y, mem_unit.hp_norm);
                     let unit_setting = crate::settings::units::get_unit_setting(mem_unit.unit_type);
-                    set_feat(&mut data, CH_MEM_ENEMY_ATTACK, x, y, unit_setting.attack / 5.0);
+                    set_feat(
+                        &mut data,
+                        CH_MEM_ENEMY_ATTACK,
+                        x,
+                        y,
+                        unit_setting.attack / 5.0,
+                    );
                     if unit_setting.range > 1 {
                         set_feat(&mut data, CH_MEM_ENEMY_RANGED, x, y, 1.0);
                     }
@@ -855,5 +895,230 @@ mod tests {
                 + CH_CITY_STATS_COUNT
                 + CH_MEM_COUNT
         );
+    }
+
+    /// Trained checkpoints and every archived `games_*.safetensors` depend on
+    /// these exact slots.
+    #[test]
+    fn channel_slots_are_stable() {
+        let terrain = [
+            (TerrainType::None, 0),
+            (TerrainType::Water, 1),
+            (TerrainType::Ocean, 2),
+            (TerrainType::Field, 3),
+            (TerrainType::Mountain, 4),
+            (TerrainType::Forest, 5),
+            (TerrainType::Ice, 6),
+            (TerrainType::Wetland, 7),
+        ];
+        for (t, ch) in terrain {
+            assert_eq!(terrain_to_channel(t), ch, "{t:?}");
+        }
+        // Mangrove has no slot; it folds onto None rather than escaping the block.
+        assert_eq!(
+            terrain_to_channel(TerrainType::Mangrove),
+            CH_TERRAIN_START,
+            "Mangrove must fold onto the None terrain slot"
+        );
+
+        let resources = [
+            (ResourceType::None, 18),
+            (ResourceType::Game, 19),
+            (ResourceType::Crop, 20),
+            (ResourceType::Fish, 21),
+            (ResourceType::Metal, 22),
+            (ResourceType::Fruit, 23),
+            (ResourceType::Spores, 24),
+            (ResourceType::Starfish, 25),
+            (ResourceType::AquaCrop, 26),
+        ];
+        for (r, ch) in resources {
+            assert_eq!(resource_to_channel(r), ch, "{r:?}");
+        }
+
+        let structures = [
+            (StructureType::None, 27),
+            (StructureType::Village, 28),
+            (StructureType::Ruin, 29),
+            (StructureType::Road, 30),
+            (StructureType::Farm, 31),
+            (StructureType::Windmill, 32),
+            (StructureType::Port, 33),
+            (StructureType::LumberHut, 34),
+            (StructureType::Sawmill, 35),
+            (StructureType::Temple, 36),
+            (StructureType::ForestTemple, 37),
+            (StructureType::WaterTemple, 38),
+            (StructureType::MountainTemple, 39),
+            (StructureType::Mine, 40),
+            (StructureType::Forge, 41),
+            (StructureType::AltarOfPeace, 42),
+            (StructureType::TowerOfWisdom, 43),
+            (StructureType::GrandBazaar, 44),
+            (StructureType::EmperorsTomb, 45),
+            (StructureType::GateOfPower, 46),
+            (StructureType::ParkOfFortune, 47),
+            (StructureType::EyeOfGod, 48),
+            (StructureType::Sanctuary, 49),
+            (StructureType::Outpost, 50),
+            (StructureType::IceBank, 51),
+            (StructureType::IceTemple, 52),
+            (StructureType::Fungi, 53),
+            (StructureType::Algae, 54),
+            (StructureType::Mycelium, 55),
+            (StructureType::Clathrus, 56),
+            (StructureType::Lighthouse, 57),
+            (StructureType::Bridge, 58),
+            (StructureType::Market, 59),
+            (StructureType::Embassy, 60),
+            (StructureType::ChurchOfConverts, 61),
+        ];
+        for (s, ch) in structures {
+            assert_eq!(structure_to_channel(s), ch, "{s:?}");
+        }
+
+        let units = [
+            (UnitType::None, 62),
+            (UnitType::Warrior, 63),
+            (UnitType::Rider, 64),
+            (UnitType::Knight, 65),
+            (UnitType::Defender, 66),
+            (UnitType::Catapult, 67),
+            (UnitType::Archer, 68),
+            (UnitType::MindBender, 69),
+            (UnitType::Swordsman, 70),
+            (UnitType::Giant, 71),
+            (UnitType::Polytaur, 72),
+            (UnitType::DragonEgg, 73),
+            (UnitType::BabyDragon, 74),
+            (UnitType::FireDragon, 75),
+            (UnitType::Amphibian, 76),
+            (UnitType::Tridention, 77),
+            (UnitType::Mooni, 78),
+            (UnitType::BattleSled, 79),
+            (UnitType::IceFortress, 80),
+            (UnitType::IceArcher, 81),
+            (UnitType::Crab, 82),
+            (UnitType::Gaami, 83),
+            (UnitType::Hexapod, 84),
+            (UnitType::Doomux, 85),
+            (UnitType::Phychi, 86),
+            (UnitType::Kiton, 87),
+            (UnitType::Exida, 88),
+            (UnitType::Centipede, 89),
+            (UnitType::Segment, 90),
+            (UnitType::Raychi, 91),
+            (UnitType::Shaman, 92),
+            (UnitType::Dagger, 93),
+            (UnitType::Cloak, 94),
+            (UnitType::Dinghy, 95),
+            (UnitType::Pirate, 96),
+            (UnitType::Bomber, 97),
+            (UnitType::Scoutship, 98),
+            (UnitType::Raft, 99),
+            (UnitType::Rammership, 100),
+            (UnitType::Juggernaut, 101),
+            (UnitType::Boomchi, 102),
+            (UnitType::LivingIsland, 103),
+            (UnitType::Mantis, 104),
+            (UnitType::InsectEgg, 105),
+            (UnitType::Moth, 106),
+            (UnitType::Larva, 107),
+        ];
+        for (u, ch) in units {
+            assert_eq!(unit_to_channel(u), ch, "{u:?}");
+        }
+
+        // Named to their constant so a failure says which channel moved.
+        macro_rules! pin {
+            ($($c:ident => $v:expr),* $(,)?) => {
+                $(assert_eq!($c, $v, stringify!($c));)*
+            };
+        }
+        pin! {
+            CH_TILE_FROZEN => 8,
+            CH_TILE_FLOODED => 9,
+            CH_TILE_HAS_ROAD => 10,
+            CH_TILE_HAS_ROUTE => 11,
+            CH_TILE_OWNER => 12,
+            CH_TILE_CLIMATE => 13,
+            CH_TILE_IS_EXPLORED => 14,
+            CH_TILE_VISIBILITY => 15,
+            CH_TILE_AT_PEACE => 16,
+            CH_TILE_EMBASSY_LEVEL => 17,
+            CH_UNIT_OWNER => 108,
+            CH_UNIT_HP => 109,
+            CH_UNIT_MAX_HP => 110,
+            CH_UNIT_VETERAN => 111,
+            CH_UNIT_MOVED => 112,
+            CH_UNIT_ATTACKED => 113,
+            CH_UNIT_KILLS => 114,
+            CH_UNIT_EFFECT_POISON => 115,
+            CH_UNIT_EFFECT_BOOST => 116,
+            CH_UNIT_EFFECT_INVISIBLE => 117,
+            CH_UNIT_EFFECT_FROZEN => 118,
+            CH_UNIT_HAS_PASSENGER => 119,
+            CH_UNIT_PASSENGER_TYPE => 120,
+            CH_UNIT_CONVERTED => 121,
+            CH_UNIT_ATTACKS_PERFORMED => 122,
+            CH_CITY_PRESENT => 124,
+            CH_CITY_OWNER => 125,
+            CH_CITY_LEVEL => 126,
+            CH_CITY_PRODUCTION => 127,
+            CH_CITY_IS_CAPITAL => 128,
+            CH_CITY_CONNECTED => 129,
+            CH_CITY_HAS_WALLS => 130,
+            CH_CITY_HAS_RIOT => 131,
+            CH_CITY_PENDING_REWARD => 132,
+            CH_CITY_BORDER_SIZE => 133,
+            CH_CITY_PROGRESS => 134,
+            CH_MEM_ENEMY_SEEN => 136,
+            CH_MEM_ENEMY_HP => 137,
+            CH_MEM_ENEMY_ATTACK => 138,
+            CH_MEM_ENEMY_RANGED => 139,
+            CH_MEM_ENEMY_NAVAL => 140,
+            CH_MEM_ATTACKED_HERE => 141,
+        }
+    }
+
+    /// A mid-enum insertion that outgrows a block must not silently write into
+    /// the next one (`TerrainType::Mangrove` did exactly that).
+    #[test]
+    fn no_enum_variant_escapes_its_block() {
+        for t in TerrainType::iter() {
+            assert!(
+                (CH_TERRAIN_START..CH_TERRAIN_END).contains(&terrain_to_channel(t)),
+                "{t:?}"
+            );
+        }
+        for r in ResourceType::iter() {
+            assert!(
+                (CH_RESOURCE_START..CH_RESOURCE_END).contains(&resource_to_channel(r)),
+                "{r:?}"
+            );
+        }
+        for s in StructureType::iter() {
+            assert!(
+                (CH_STRUCTURE_START..CH_STRUCTURE_END).contains(&structure_to_channel(s)),
+                "{s:?}"
+            );
+        }
+        for u in UnitType::iter() {
+            assert!(
+                (CH_UNIT_START..CH_UNIT_END).contains(&unit_to_channel(u)),
+                "{u:?}"
+            );
+        }
+
+        // A variant with no slot of its own is a channel-budget decision, never
+        // an accident: state which enums are exactly saturated.
+        assert_eq!(
+            TerrainType::iter().count(),
+            TERRAIN_COUNT + 1,
+            "Mangrove is the only unslotted terrain"
+        );
+        assert_eq!(ResourceType::iter().count(), RESOURCE_COUNT);
+        assert_eq!(StructureType::iter().count(), STRUCTURE_COUNT);
+        assert_eq!(UnitType::iter().count(), UNIT_COUNT);
     }
 }
