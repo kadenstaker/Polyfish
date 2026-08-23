@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 const CSV_PATH: &str = "training_log.csv";
 const MOVES_PATH: &str = "moves_by_turn.json";
 const VALUE_DIST_PATH: &str = "value_distribution.json";
+const LADDER_PATH: &str = "ladder.json";
+const RATINGS_PATH: &str = "elo_ratings.json";
 
 #[derive(Debug, Clone)]
 struct MetricRow {
@@ -259,10 +261,25 @@ pub async fn api_moves_by_turn(Query(q): Query<RunFilter>) -> Json<Value> {
     Json(all)
 }
 
+/// The ladder plus elo.py's joint fit under `ratings`, once the loop has
+/// written one. A reading's own `elo_est` is one match chained onto one
+/// anchor's number; the fit is every recorded match at once.
+fn ladder_with_ratings(ladder: &str, ratings: Option<String>) -> Value {
+    let mut all: Value =
+        serde_json::from_str(ladder).unwrap_or_else(|_| json!({ "anchors": [], "readings": [] }));
+    let fitted = ratings.and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    if let (Some(obj), Some(fitted)) = (all.as_object_mut(), fitted) {
+        obj.insert("ratings".to_string(), fitted);
+    }
+    all
+}
+
 pub async fn api_elo_ladder() -> Json<Value> {
-    let content = std::fs::read_to_string("ladder.json").unwrap_or_else(|_| "{}".to_string());
-    let all: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({ "anchors": [], "readings": [] }));
-    Json(all)
+    let ladder = std::fs::read_to_string(LADDER_PATH).unwrap_or_else(|_| "{}".to_string());
+    Json(ladder_with_ratings(
+        &ladder,
+        std::fs::read_to_string(RATINGS_PATH).ok(),
+    ))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -525,5 +542,29 @@ pub struct ApiError(StatusCode, String);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_joint_fit_rides_along_with_the_ladder() {
+        let out = ladder_with_ratings(
+            r#"{"anchors":[],"readings":[]}"#,
+            Some(r#"{"greedy":{"elo":0.0}}"#.to_string()),
+        );
+        assert_eq!(out["ratings"]["greedy"]["elo"], 0.0);
+        assert!(out["readings"].is_array());
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_fit_leaves_the_ladder_intact() {
+        for ratings in [None, Some("not json".to_string())] {
+            let out = ladder_with_ratings(r#"{"anchors":[{"name":"greedy"}]}"#, ratings);
+            assert_eq!(out["anchors"][0]["name"], "greedy");
+            assert!(out.get("ratings").is_none());
+        }
     }
 }

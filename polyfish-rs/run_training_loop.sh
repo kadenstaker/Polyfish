@@ -750,6 +750,23 @@ do
             fi
         }
 
+        # Joint Bradley-Terry fit over every reading the ladder holds, refit
+        # from scratch into the file /api/elo-ladder serves. The verdict's
+        # elo_est below is one match against one anchor chained onto that
+        # anchor's own number; this is the whole graph at once, with bootstrap
+        # intervals. Derived data, recomputable from ladder.json at any time,
+        # so a failure is reported and the run continues - unlike the reading
+        # itself, which is fatal.
+        refit_elo () {
+            local out
+            if out=$(.venv/bin/python3 elo.py fit --source ladder \
+                    --ladder ladder.json --out elo_ratings.json --quiet); then
+                echo "ELO: $out"
+            else
+                echo "ELO: joint refit failed (non-fatal); elo_ratings.json is stale" >&2
+            fi
+        }
+
         # A failed reading is fatal: the ladder is the instrument every
         # experiment is judged on, and continuing past a broken gauge is what
         # left the whole campaign without a single recorded reading.
@@ -816,6 +833,7 @@ do
                 --avg-score-model "${GAUGE_S1:-0}" --avg-score-opponent "${GAUGE_S2:-0}" \
                 --tribes "$GAUGE_TRIBES"
         elif [ "$GAUGE_ACTION" = "stop" ]; then
+            refit_elo
             rm -f "$GAUGE_LOG"
             echo "=================================================="
             echo "PLATEAU STOP at iteration $i: two consecutive 8-reading"
@@ -843,7 +861,7 @@ do
                     --avg-score-model "${GAUGE_S1:-0}" --avg-score-opponent "${GAUGE_S2:-0}" \
                     --mcts "$MCTS_ITERS" --gumbel-k "$GUMBEL_K" --eval-backend "${GAUGE_BACKEND:-}" \
                     --wins-p1 "${GAUGE_WP1:-0}" --wins-p2 "${GAUGE_WP2:-0}" \
-                    --tribes "$GAUGE_TRIBES" \
+                    --tribes "$GAUGE_TRIBES" --max-turns "$GAUGE_MAX_TURNS" \
                     --prior-heuristic-w "$GAUGE_PRIOR_W" --q-weight "$GAUGE_Q_W" \
                     --stats-dir "$GAUGE_STATS_DIR"
             done < <(.venv/bin/python3 ladder.py audit-opponents | json_array_items)
@@ -873,6 +891,7 @@ do
                 fi
             fi
         fi
+        refit_elo
         rm -f "$GAUGE_LOG"
     fi
 

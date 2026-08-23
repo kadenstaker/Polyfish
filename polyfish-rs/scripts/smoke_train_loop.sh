@@ -42,6 +42,7 @@ tar -C "$REPO" -cf - \
     --exclude=./.run_bin --exclude='./games_*.safetensors' \
     --exclude=./model.safetensors --exclude=./optimizer_state.pt \
     --exclude=./training_log.csv --exclude=./ladder.json \
+    --exclude=./elo_ratings.json \
     --exclude=./moves_by_turn.json --exclude='./*.log' \
     --exclude='./.last_*' --exclude='./.anchor_*' --exclude=./.training.pid \
     . | tar -C "$SMOKE_DIR" -xf -
@@ -134,6 +135,15 @@ print(json.load(open(sys.argv[1]))["readings"][0].get("tribes",""))' "$SMOKE_DIR
     [ -n "$PLAYED" ] || fail "arena printed no tribe pair for the gauge match"
     [ "$PLAYED" = "$RECORDED" ] \
         || fail "ladder recorded tribes '$RECORDED' for a match arena played on '$PLAYED'"
+    # #8: the joint Elo fit is refit from the ladder after every reading, and
+    # its failure is non-fatal by design, so nothing but this notices when it
+    # stops running. The anchor is what pins the scale, so assert it landed at 0.
+    [ -s "$SMOKE_DIR/elo_ratings.json" ] || fail "the gauge block wrote no elo_ratings.json"
+    "$SMOKE_VENV/bin/python3" -c 'import json,sys
+r = json.load(open(sys.argv[1]))
+assert r["greedy"]["elo"] == 0.0, "greedy is not pinned at 0 elo"
+assert any(p != "greedy" for p in r), "the fit rated nothing but the anchor"' \
+        "$SMOKE_DIR/elo_ratings.json" || fail "elo_ratings.json is not an anchored rating table"
 fi
 
 # The branch this smoke exists to reach at all (#35): a freeze snapshots an
