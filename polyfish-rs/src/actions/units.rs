@@ -8,6 +8,7 @@ use crate::functions::*;
 use crate::settings::{get_unit_setting, has_skill};
 use crate::states::*;
 use crate::types::*;
+use crate::version_sync::{GameVersion, is_before};
 
 /// Remove a unit from the game
 ///
@@ -124,8 +125,8 @@ pub fn remove_unit(
                     let old_max_hp = crate::functions::get_unit_max_health(child);
                     let mut damage = old_max_hp - child.health;
 
-                    // Versions < 115 had a bug where damage was not inherited
-                    if state.settings.version < 115 {
+                    // Versions before the Cymanti rework did not inherit damage
+                    if is_before(state.settings.version, GameVersion::CymantiRework) {
                         damage = 0.0;
                     }
 
@@ -318,10 +319,10 @@ pub fn step_unit(
             unit.coords.set_at(to_tile_idx, map_size);
 
             // Version-dependent exhaustion logic:
-            // - Before v115: All involuntary moves (pushes) do not exhaust the unit.
-            // - v115 and later: Only units with Skate skill avoid exhaustion when pushed.
+            // - Before the Cymanti rework: involuntary moves (pushes) never exhaust.
+            // - From it on: only units with Skate avoid exhaustion when pushed.
             // dev: idek, adventure-of-assha_1774823883 crashes because of it. this fixes it.
-            let exhaust = if state.settings.version < 115 {
+            let exhaust = if is_before(state.settings.version, GameVersion::CymantiRework) {
                 !involuntary
             } else {
                 !involuntary || !has_skill(unit.unit_type, SkillType::Skate)

@@ -14,6 +14,7 @@ use crate::coords::Coords;
 use crate::functions::{get_adjacent_indices, get_enemy_at};
 use crate::states::*;
 use crate::types::*;
+use crate::version_sync::{GameVersion, is_before};
 
 /// Type alias for undo callback
 pub type UndoCallback = Box<dyn FnOnce(&mut GameState)>;
@@ -547,8 +548,8 @@ pub fn process_start_turn_effects(state: &mut GameState, player_id: PlayerId) ->
                     let old_max_hp = crate::functions::get_unit_max_health(unit);
                     let mut damage = old_max_hp - unit.health;
 
-                    // Support for bug in versions < 115: Damage not inherited
-                    if state.settings.version < 115 {
+                    // Support for bug before the Cymanti rework: damage not inherited
+                    if is_before(state.settings.version, GameVersion::CymantiRework) {
                         damage = 0.0;
                     }
 
@@ -688,7 +689,7 @@ pub fn process_start_turn_effects(state: &mut GameState, player_id: PlayerId) ->
             if let Some(structure) = state.structures.get_mut(&f_idx).and_then(|s| s.as_mut()) {
                 // Growth requirement: turn - founded > 0 (prevents same-turn growth)
                 let age = state.settings.turn - structure.founded;
-                let max_level = if state.settings.version < 115 {
+                let max_level = if is_before(state.settings.version, GameVersion::CymantiRework) {
                     3
                 } else {
                     if has_recycling { 3 } else { 2 }

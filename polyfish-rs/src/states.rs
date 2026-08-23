@@ -467,7 +467,7 @@ pub struct GameSettings {
     pub max_turns: i32,
     #[serde(default)]
     pub current_player_turn_id: i32,
-    #[serde(default)]
+    #[serde(default = "crate::version_sync::default_version")]
     pub version: i32,
     #[serde(default)]
     pub game_name: String,
@@ -533,7 +533,7 @@ impl Default for GameSettings {
             turn: default_turn(),
             max_turns: default_max_turns(),
             current_player_turn_id: 1,
-            version: 1,
+            version: crate::version_sync::CURRENT_VERSION,
             game_name: String::new(),
             seed: 0,
             win_by_capital: false,
