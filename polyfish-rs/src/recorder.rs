@@ -1,5 +1,5 @@
 use crate::ai::features::{GameFeatures, state_to_tensor};
-use crate::ai::mapper::{DecomposedMapper, DecomposedTargets};
+use crate::ai::mapper::{DecomposedMapper, DecomposedTargets, NUM_MOVE_OPTIONS};
 use crate::ai::network::NUM_ACTION_TYPES;
 use crate::moves::Move;
 use crate::states::{GameState, PlayerId};
@@ -117,7 +117,7 @@ impl GameRecorder {
         // "action_type": [N, NUM_ACTION_TYPES]
         // "source_spatial": [N, H*W]
         // "target_spatial": [N, H*W]
-        // "move_option": [N, 192]
+        // "move_option": [N, NUM_MOVE_OPTIONS]
         // "values": [N, 1] (win)
         // "eco_targets": [N, 1]
         // "mil_targets": [N, 1] (optional in train.rs, but we can save them)
@@ -167,7 +167,11 @@ impl GameRecorder {
             )?);
             t_source.push(one_hot_tensor(tgt.source_spatial, map_area, &self.device)?);
             t_target.push(one_hot_tensor(tgt.target_spatial, map_area, &self.device)?);
-            t_option.push(one_hot_tensor(tgt.target_type, 192, &self.device)?);
+            t_option.push(one_hot_tensor(
+                tgt.target_type,
+                NUM_MOVE_OPTIONS,
+                &self.device,
+            )?);
 
             let win = step.win.unwrap_or(0.0);
             t_win.push(Tensor::from_vec(vec![win], (1, 1), &self.device)?);

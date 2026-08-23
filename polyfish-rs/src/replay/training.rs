@@ -1,5 +1,5 @@
 use crate::ai::features::{self, RawFeatures};
-use crate::ai::mapper::{DecomposedMapper, DecomposedTargets};
+use crate::ai::mapper::{DecomposedMapper, DecomposedTargets, NUM_MOVE_OPTIONS};
 use crate::ai::network::NUM_ACTION_TYPES;
 use crate::functions::get_tribe_spt;
 use crate::game::Game;
@@ -329,7 +329,7 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
     let mut action = vec![0.0f32; n * NUM_ACTION_TYPES];
     let mut source = vec![0.0f32; n * area];
     let mut target = vec![0.0f32; n * area];
-    let mut option = vec![0.0f32; n * 192];
+    let mut option = vec![0.0f32; n * NUM_MOVE_OPTIONS];
     let mut values = Vec::with_capacity(n);
     let mut progress = Vec::with_capacity(n);
     let mut progress_mask = Vec::with_capacity(n);
@@ -351,7 +351,7 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
             target[row * area + i] = 1.0;
         }
         if let Some(i) = sample.targets.target_type {
-            option[row * 192 + i] = 1.0;
+            option[row * NUM_MOVE_OPTIONS + i] = 1.0;
         }
         values.push(sample.value);
         progress.push(sample.progress);
@@ -385,7 +385,10 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
     );
     tensors.insert("source_spatial".into(), tensor(source, &[n, area])?);
     tensors.insert("target_spatial".into(), tensor(target, &[n, area])?);
-    tensors.insert("move_option".into(), tensor(option, &[n, 192])?);
+    tensors.insert(
+        "move_option".into(),
+        tensor(option, &[n, NUM_MOVE_OPTIONS])?,
+    );
     tensors.insert("progress".into(), tensor(progress, &[n, 1])?);
     tensors.insert("progress_mask".into(), tensor(progress_mask, &[n])?);
     tensors.insert("aux_ownership".into(), tensor(ownership, &[n, area])?);
@@ -406,7 +409,7 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
         map_width: features::MAP_SIZE,
         map_height: features::MAP_SIZE,
         num_action_types: NUM_ACTION_TYPES,
-        move_option_dim: 192,
+        move_option_dim: NUM_MOVE_OPTIONS,
         num_samples: n,
         source_files: source_files.into_iter().collect(),
     };

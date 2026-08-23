@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use polyfish::replay::training::{TrainingCollector, TrainingSample, write_training_files};
-use polyfish::replay::{ReplayExecutor, load_replay, validate_training_eligibility};
+use polyfish::replay::{
+    ReplayExecutor, is_canonical_replay_file, load_replay, validate_training_eligibility,
+};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,7 +78,7 @@ fn replay_files(input: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
-        .filter(|path| path.to_string_lossy().ends_with(".replay.json"))
+        .filter(|path| is_canonical_replay_file(path))
         .collect();
     files.sort();
     Ok(files)

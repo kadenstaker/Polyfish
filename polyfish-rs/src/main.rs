@@ -15,7 +15,10 @@ use polyfish::moves::{
         freeze_area::FreezeAreaMove, heal_others::HealOthersMove, promote::PromoteMove,
     },
 };
-use polyfish::replay::{Replay, ReplayExecutor, ReplayPlayback, load_replay};
+use polyfish::replay::{
+    REPLAY_DIR, Replay, ReplayExecutor, ReplayPlayback, canonical_replay_file_name,
+    is_canonical_replay_file, load_replay, local_replay_path,
+};
 use polyfish::types::{
     AbilityType, CityRewardType, MapSize, StructureType, TechnologyType, TribeType, UnitType,
 };
@@ -70,10 +73,10 @@ async fn main() {
 
     // 2. Try to load the latest canonical replay from replays/.
     if !loaded {
-        if let Ok(entries) = std::fs::read_dir("replays") {
+        if let Ok(entries) = std::fs::read_dir(REPLAY_DIR) {
             let mut canonical_replays: Vec<_> = entries
                 .flatten()
-                .filter(|e| e.file_name().to_string_lossy().ends_with(".replay.json"))
+                .filter(|e| is_canonical_replay_file(&e.path()))
                 .collect();
 
             canonical_replays.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
@@ -123,8 +126,7 @@ async fn main() {
             )
             .expect("Failed to load model weights")
         };
-        polyfish::ai::network::PolyZeroNet::new(vb)
-            .expect("Failed to build neural network")
+        polyfish::ai::network::PolyZeroNet::new(vb).expect("Failed to build neural network")
     } else {
         panic!(
             "Model file {} not found! Please run init_model.py first.",
@@ -643,7 +645,12 @@ async fn reset_game(
     } else {
         match serde_json::from_slice(&body_bytes) {
             Ok(p) => Some(p),
-            Err(e) => return Err((axum::http::StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e))),
+            Err(e) => {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Invalid JSON: {}", e),
+                ));
+            }
         }
     };
 
@@ -1148,23 +1155,6 @@ async fn check_replay_exists(Json(params): Json<CheckReplayParams>) -> Json<Valu
     }
 }
 
-fn sanitize_storage_key(name: &str) -> String {
-    let mut result = String::new();
-    let mut last_was_dash = false;
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            result.push(c.to_ascii_lowercase());
-            last_was_dash = false;
-        } else {
-            if !last_was_dash && !result.is_empty() {
-                result.push('-');
-                last_was_dash = true;
-            }
-        }
-    }
-    result.trim_matches('-').to_string()
-}
-
 async fn save_replay_endpoint(
     State(_state): State<Arc<AppState>>,
     body: Json<Value>,
@@ -1179,7 +1169,7 @@ async fn save_replay_endpoint(
         return replay_error_json(error);
     }
     // Create replays directory if not exists
-    let _ = std::fs::create_dir_all("replays");
+    let _ = std::fs::create_dir_all(REPLAY_DIR);
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1229,31 +1219,54 @@ async fn save_replay_endpoint(
                 .header("apikey", &supabase_key)
                 .header("Authorization", format!("Bearer {}", supabase_key));
 
-            if let Ok(res) = req.send().await {
-                if let Ok(json) = res.json::<serde_json::Value>().await {
-                    if let Some(arr) = json.as_array() {
-                        if !arr.is_empty() {
-                            println!(
-                                "⚠️ Rejected duplicate game (UUID or Seed/Name): {}",
-                                game_name
-                            );
-                            return Json(serde_json::json!({
-                                "status": "error",
-                                "message": "Duplicate game found"
-                            }));
+            // Fail closed: only a 2xx array body clears a replay for upload, so an
+            // unreachable or erroring Supabase refuses visibly instead of duplicating.
+            let already_present = match req.send().await {
+                Ok(res) => {
+                    let status = res.status();
+                    if !status.is_success() {
+                        let body = res.text().await.unwrap_or_default();
+                        return replay_error_json(format!(
+                            "Duplicate check failed ({status}), refusing to upload: {body}"
+                        ));
+                    }
+                    match res.json::<serde_json::Value>().await {
+                        Ok(json) => match json.as_array() {
+                            Some(rows) => !rows.is_empty(),
+                            None => {
+                                return replay_error_json(
+                                    "Duplicate check returned a non-array body, refusing to upload",
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            return replay_error_json(format!(
+                                "Duplicate check body unreadable ({e}), refusing to upload"
+                            ));
                         }
                     }
                 }
+                Err(e) => {
+                    return replay_error_json(format!(
+                        "Duplicate check network error ({e}), refusing to upload"
+                    ));
+                }
+            };
+            if already_present {
+                println!(
+                    "⚠️ Rejected duplicate game (UUID or Seed/Name): {}",
+                    game_name
+                );
+                return Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Duplicate game found"
+                }));
             }
 
             // Record does not exist, upload to Supabase Storage directly!
             let bucket_name =
                 std::env::var("SUPABASE_STORAGE_BUCKET").unwrap_or_else(|_| "games".to_string());
-            let file_name = format!(
-                "{}_{}.replay.json",
-                sanitize_storage_key(game_name),
-                timestamp
-            );
+            let file_name = canonical_replay_file_name(game_name, timestamp);
             let storage_url = format!(
                 "{}/storage/v1/object/{}/{}",
                 supabase_url.trim_end_matches('/'),
@@ -1343,11 +1356,9 @@ async fn save_replay_endpoint(
             game_name
         );
         (
-            format!(
-                "replays/{}_{}.json",
-                sanitize_storage_key(game_name),
-                timestamp
-            ),
+            local_replay_path(game_name, timestamp)
+                .to_string_lossy()
+                .into_owned(),
             serde_json::to_string_pretty(&replay).unwrap(),
         )
     };
@@ -1391,11 +1402,10 @@ async fn save_replay_local_endpoint(
         .filter(|name| !name.is_empty())
         .unwrap_or(&replay.initial_state.settings.game_name);
 
-    let filename = format!(
-        "replays/{}_{}.replay.json",
-                sanitize_storage_key(game_name),
-                timestamp
-    );
+    let _ = std::fs::create_dir_all(REPLAY_DIR);
+    let filename = local_replay_path(game_name, timestamp)
+        .to_string_lossy()
+        .into_owned();
     let content = serde_json::to_string_pretty(&replay).unwrap();
 
     println!("✅ Successfully saved {} to Local Storage", game_name);
@@ -1494,7 +1504,7 @@ fn replay_error_json(error: impl std::fmt::Display) -> Json<Value> {
 
 fn replay_playback_json(playback: &ReplayPlayback, filename: Option<&str>) -> Value {
     let game = playback.game();
-                let mut tiles: Vec<_> = game.state.tiles.values().collect();
+    let mut tiles: Vec<_> = game.state.tiles.values().collect();
     tiles.sort_by_key(|tile| tile.coords.idx);
     serde_json::json!({
                     "status": "success",
@@ -1684,7 +1694,6 @@ async fn load_initial_endpoint(
     }
 }
 
-
 async fn list_initial_endpoint() -> Json<Value> {
     let path = "../src/scraper/data/training-data/";
     let mut files = Vec::new();
@@ -1706,31 +1715,6 @@ async fn list_initial_endpoint() -> Json<Value> {
         "status": "success",
         "files": files
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sanitize_storage_key() {
-        assert_eq!(
-            sanitize_storage_key("The Winter of Love"),
-            "the-winter-of-love"
-        );
-        assert_eq!(
-            sanitize_storage_key("game-4-(yădakk-qualifiers-"),
-            "game-4-y-dakk-qualifiers"
-        );
-        assert_eq!(sanitize_storage_key("Hello World!!!"), "hello-world");
-        assert_eq!(
-            sanitize_storage_key("---Multiple---Dashes---"),
-            "multiple-dashes"
-        );
-        assert_eq!(sanitize_storage_key("UPPER_case_123"), "upper_case_123");
-        assert_eq!(sanitize_storage_key(""), "");
-        assert_eq!(sanitize_storage_key("!@#$%^&*()"), "");
-    }
 }
 
 async fn get_cpu_usage() -> Json<Value> {

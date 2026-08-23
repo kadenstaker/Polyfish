@@ -1,87 +1,96 @@
+use clap::Parser;
+use polyfish::supabase::{SupabaseTarget, confirm_destructive, count_rows};
 use serde_json::Value;
-use std::env;
+
+/// Empties the Supabase storage bucket and the games table.
+#[derive(Debug, Parser)]
+#[command(about = "Empty the Supabase replay bucket and delete every games row")]
+struct Args {
+    /// Skip the typed confirmation. Required for non-interactive runs.
+    #[arg(long)]
+    yes: bool,
+    /// Print the resolved target and everything that would be deleted, then exit.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+/// One page of object names in the bucket, folder placeholders filtered out.
+async fn list_bucket(
+    client: &reqwest::Client,
+    target: &SupabaseTarget,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let res = client
+        .post(target.storage(&format!("object/list/{}", target.bucket)))
+        .header("apikey", &target.key)
+        .header("Authorization", format!("Bearer {}", target.key))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "limit": 1000, "offset": 0 }))
+        .send()
+        .await?;
+
+    if !res.status().is_success() {
+        return Err(format!("failed to list bucket: {}", res.text().await?).into());
+    }
+
+    let files: Vec<Value> = res.json().await?;
+    Ok(files
+        .into_iter()
+        .filter_map(|f| f["name"].as_str().map(|s| s.to_string()))
+        .filter(|name| !name.is_empty())
+        .collect())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-
-    let supabase_url = env::var("SUPABASE_URL").expect("SUPABASE_URL not set");
-    let supabase_key = env::var("SUPABASE_SERVICE_ROLE_KEY")
-        .or_else(|_| env::var("SUPABASE_PUBLIC_ANON_KEY"))
-        .expect("Supabase key not set");
-
-    let bucket_name = env::var("SUPABASE_STORAGE_BUCKET").unwrap_or_else(|_| "games".to_string());
+    let args = Args::parse();
+    let target = SupabaseTarget::from_env()?;
+    target.describe();
 
     let client = reqwest::Client::new();
-
+    let objects = list_bucket(&client, &target).await?;
     println!(
-        "⚠️ WARNING: This will delete ALL data from the 'games' table AND empty the '{}' bucket.",
-        bucket_name
+        "Objects in bucket (first page): {}{}",
+        objects.len(),
+        if objects.len() == 1000 { "+" } else { "" }
     );
-    println!("Waiting 3 seconds before proceeding...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    match count_rows(&client, &target, "games").await {
+        Some(n) => println!("Rows in 'games' that would be deleted: {n}"),
+        None => println!("Rows in 'games' that would be deleted: unknown (count query failed)"),
+    }
+
+    if args.dry_run {
+        for name in &objects {
+            println!("  would delete {name}");
+        }
+        println!("--dry-run: nothing was deleted.");
+        return Ok(());
+    }
+    if !confirm_destructive(
+        "delete every replay object and every games row",
+        "delete everything",
+        args.yes,
+    ) {
+        std::process::exit(1);
+    }
 
     // --- 1. Empty Storage Bucket ---
-    println!("\n🗑️  Emptying storage bucket '{}'...", bucket_name);
+    println!("\n🗑️  Emptying storage bucket '{}'...", target.bucket);
     let mut files_deleted = 0;
 
     loop {
-        // List up to 1000 files
-        let list_url = format!(
-            "{}/storage/v1/object/list/{}",
-            supabase_url.trim_end_matches('/'),
-            bucket_name
-        );
-
-        let res = client
-            .post(&list_url)
-            .header("apikey", &supabase_key)
-            .header("Authorization", format!("Bearer {}", supabase_key))
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "limit": 1000,
-                "offset": 0
-            }))
-            .send()
-            .await?;
-
-        if !res.status().is_success() {
-            eprintln!("❌ Failed to list files in bucket: {}", res.text().await?);
-            break;
-        }
-
-        let files: Vec<Value> = res.json().await?;
-        if files.is_empty() {
+        let filenames = list_bucket(&client, &target).await?;
+        if filenames.is_empty() {
             println!("✅ Bucket is empty.");
             break;
         }
 
-        // Extract filenames, ignoring folders like `.emptyFolderPlaceholder`
-        let filenames: Vec<String> = files
-            .into_iter()
-            .filter_map(|f| f["name"].as_str().map(|s| s.to_string()))
-            .filter(|name| !name.is_empty())
-            .collect();
-
-        if filenames.is_empty() {
-            break;
-        }
-
-        let delete_url = format!(
-            "{}/storage/v1/object/{}",
-            supabase_url.trim_end_matches('/'),
-            bucket_name
-        );
-
-        // Use bulk delete API
+        // Bulk delete API
         let del_res = client
-            .delete(&delete_url)
-            .header("apikey", &supabase_key)
-            .header("Authorization", format!("Bearer {}", supabase_key))
+            .delete(target.storage(&format!("object/{}", target.bucket)))
+            .header("apikey", &target.key)
+            .header("Authorization", format!("Bearer {}", target.key))
             .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "prefixes": filenames
-            }))
+            .json(&serde_json::json!({ "prefixes": filenames }))
             .send()
             .await?;
 
@@ -100,16 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 2. Clear Database Table ---
     println!("\n🗑️  Deleting all rows from 'games' table...");
-    // We can use a DELETE targeting all records where id is not null
-    let table_url = format!(
-        "{}/rest/v1/games?id=not.is.null",
-        supabase_url.trim_end_matches('/')
-    );
-
     let res = client
-        .delete(&table_url)
-        .header("apikey", &supabase_key)
-        .header("Authorization", format!("Bearer {}", supabase_key))
+        .delete(target.rest("games?id=not.is.null"))
+        .header("apikey", &target.key)
+        .header("Authorization", format!("Bearer {}", target.key))
         .send()
         .await?;
 

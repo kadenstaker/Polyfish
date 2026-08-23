@@ -1,5 +1,6 @@
 use super::*;
 use crate::ai::features;
+use crate::ai::mapper::NUM_MOVE_OPTIONS;
 use crate::ai::network::NUM_ACTION_TYPES;
 use crate::mapgen::{MapGenSettings, generate};
 use crate::moves::{EndTurnMove, Move};
@@ -215,11 +216,26 @@ fn safetensors_writer_emits_expected_shapes() {
         tensors["spatial_maps"].dims(),
         &[1, features::NUM_CHANNELS * 121]
     );
-    assert_eq!(tensors["player_states"].dims(), &[1, features::RawFeatures::PLAYER_STATE_DIM]);
+    assert_eq!(
+        tensors["player_states"].dims(),
+        &[1, features::RawFeatures::PLAYER_STATE_DIM]
+    );
     assert_eq!(tensors["action_type"].dims(), &[1, NUM_ACTION_TYPES]);
     assert_eq!(tensors["source_spatial"].dims(), &[1, 121]);
     assert_eq!(tensors["target_spatial"].dims(), &[1, 121]);
-    assert_eq!(tensors["move_option"].dims(), &[1, 192]);
+    assert_eq!(tensors["move_option"].dims(), &[1, NUM_MOVE_OPTIONS]);
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(format!("{}.manifest.json", paths[0].display())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["moveOptionDim"].as_u64(),
+        Some(NUM_MOVE_OPTIONS as u64)
+    );
+    assert_eq!(
+        manifest["numActionTypes"].as_u64(),
+        Some(NUM_ACTION_TYPES as u64)
+    );
     assert_eq!(tensors["progress_mask"].dims(), &[1]);
     assert_eq!(tensors["aux_mask"].dims(), &[1]);
     let action_type = tensors["action_type"].to_vec2::<f32>().unwrap();

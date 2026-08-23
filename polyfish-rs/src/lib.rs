@@ -20,6 +20,7 @@ pub mod replay;
 pub mod score;
 pub mod settings;
 pub mod states;
+pub mod supabase;
 pub mod training_api;
 pub mod types;
 pub mod version_sync;

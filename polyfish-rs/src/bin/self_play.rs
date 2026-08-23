@@ -10,7 +10,7 @@ use polyfish::ai::eval_server::{
     ShardedEvalHandle,
 };
 use polyfish::ai::features::{self, GameFeatures, state_to_tensor};
-use polyfish::ai::mapper::DecomposedMapper;
+use polyfish::ai::mapper::{DecomposedMapper, NUM_MOVE_OPTIONS};
 use polyfish::ai::network::PolyZeroNet;
 use polyfish::ai::reward;
 use polyfish::game::{Game, STARTING_OWNER_ID};
@@ -177,7 +177,6 @@ fn write_decision_trace(
     }
 }
 
-
 /// Curriculum — Tiny maps only, turn cap grows with (effective) iteration.
 fn curriculum(iteration: usize) -> (MapSize, i32) {
     if iteration <= 10 {
@@ -212,7 +211,7 @@ struct DecomposedPolicyData {
     action_type: Vec<f32>,    // [12]
     source_spatial: Vec<f32>, // [H * W]
     target_spatial: Vec<f32>, // [H * W]
-    move_option: Vec<f32>,    // [192]
+    move_option: Vec<f32>,    // [NUM_MOVE_OPTIONS]
 }
 
 /// One recorded decision point. `my_score`/`opp_score`/`turn` are snapshotted
@@ -813,7 +812,7 @@ fn play_single_game(
         let mut p_action = vec![0.0; polyfish::ai::network::NUM_ACTION_TYPES];
         let mut p_source = vec![0.0; fixed_spatial_size];
         let mut p_target = vec![0.0; fixed_spatial_size];
-        let mut p_option = vec![0.0; 192]; // Unified option head (Expanded)
+        let mut p_option = vec![0.0; NUM_MOVE_OPTIONS];
 
         let mut total_visits = 0.0;
 
@@ -1621,7 +1620,7 @@ fn main() -> anyhow::Result<()> {
     // for the Metal cross-thread-tensor invariant this design preserves).
     let games_start = Instant::now();
 
-    use polyfish::ai::eval_backend::{resolve_eval_backend_kind, EvalBackendKind};
+    use polyfish::ai::eval_backend::{EvalBackendKind, resolve_eval_backend_kind};
 
     // Resolve the eval backend: explicit --eval-backend, else auto (metal
     // when compiled in, else tch when compiled in, else candle).
@@ -2471,8 +2470,11 @@ fn main() -> anyhow::Result<()> {
             (total_steps, spatial_logit_dim),
             &device,
         )?;
-        let option_tensor =
-            Tensor::from_vec(flatten_vec(collected_option), (total_steps, 192), &device)?;
+        let option_tensor = Tensor::from_vec(
+            flatten_vec(collected_option),
+            (total_steps, NUM_MOVE_OPTIONS),
+            &device,
+        )?;
 
         // Values
         let values_tensor = Tensor::from_vec(collected_values, (total_steps, 1), &device)?;
@@ -2900,18 +2902,26 @@ mod opening_sampler_tests {
     }
 
     /// Openings drawn from one game's stream, as comparable strings.
-    fn draws(seed: i64, game_idx: usize, game: &Game, visits: &[MoveVisit], n: usize) -> Vec<String> {
+    fn draws(
+        seed: i64,
+        game_idx: usize,
+        game: &Game,
+        visits: &[MoveVisit],
+        n: usize,
+    ) -> Vec<String> {
         let mut rng = opening_rng_for(seed, game_idx);
         (0..n)
-            .map(|_| match sample_opening_move(&game.state, visits, &mut rng) {
-                Some(m) => format!(
-                    "{:?}:{:?}:{:?}",
-                    m.move_type(),
-                    m.source_idx().ok(),
-                    m.target_idx().ok()
-                ),
-                None => "none".to_string(),
-            })
+            .map(
+                |_| match sample_opening_move(&game.state, visits, &mut rng) {
+                    Some(m) => format!(
+                        "{:?}:{:?}:{:?}",
+                        m.move_type(),
+                        m.source_idx().ok(),
+                        m.target_idx().ok()
+                    ),
+                    None => "none".to_string(),
+                },
+            )
             .collect()
     }
 
