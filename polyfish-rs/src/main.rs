@@ -22,6 +22,7 @@ use polyfish::replay::{
 use polyfish::types::{
     AbilityType, CityRewardType, MapSize, StructureType, TechnologyType, TribeType, UnitType,
 };
+use polyfish::web_static;
 use polyfish::{MapType, game::Game};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -189,15 +190,21 @@ async fn main() {
             "/api/elo-ladder",
             get(polyfish::training_api::api_elo_ladder),
         )
-        .nest_service("/assets", ServeDir::new("../polyfish-ui/dist/assets"))
-        .nest_service("/simulator", ServeDir::new("../polyfish-ui/dist/simulator"))
-        .nest_service("/static", ServeDir::new("../polyfish-ui/dist"))
+        .nest_service(
+            "/assets",
+            ServeDir::new(format!("{}/assets", web_static::SPA_DIST)),
+        )
+        // Same bytes as the fallback below, not a second copy: `polyfish-ui`
+        // iframes /simulator/index.html and /simulator/training.html, so the
+        // prefix has to keep resolving (a matched nest never reaches a fallback).
+        .nest_service("/simulator", ServeDir::new(web_static::STATIC_UI))
+        .nest_service("/static", ServeDir::new(web_static::SPA_DIST))
         // Built SPA first, then the static UI in src/public (training.html, js/,
         // css/) that ships unbuilt; unmatched paths fall back to SPA routing.
         // `fallback` keeps the second dir's own status — `not_found_service`
         // would stamp 404 onto files it serves successfully.
-        .fallback_service(ServeDir::new("../polyfish-ui/dist").fallback(
-            ServeDir::new("../src/public").not_found_service(spa_fallback.into_service()),
+        .fallback_service(ServeDir::new(web_static::SPA_DIST).fallback(
+            ServeDir::new(web_static::STATIC_UI).not_found_service(spa_fallback.into_service()),
         ))
         .layer(CorsLayer::permissive())
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 50))
@@ -1769,7 +1776,7 @@ async fn get_cpu_usage() -> Json<Value> {
 
 async fn spa_fallback() -> impl axum::response::IntoResponse {
     use axum::response::IntoResponse;
-    let index_path = std::path::Path::new("../polyfish-ui/dist/index.html");
+    let index_path = std::path::Path::new(web_static::SPA_DIST).join("index.html");
     match std::fs::read_to_string(index_path) {
         Ok(html) => axum::response::Html(html).into_response(),
         Err(_) => (axum::http::StatusCode::NOT_FOUND, "index.html not found").into_response(),
