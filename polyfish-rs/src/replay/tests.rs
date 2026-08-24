@@ -236,6 +236,11 @@ fn safetensors_writer_emits_expected_shapes() {
         manifest["numActionTypes"].as_u64(),
         Some(NUM_ACTION_TYPES as u64)
     );
+    assert_eq!(
+        manifest["derivedResultSourceFiles"],
+        serde_json::json!([]),
+        "a captured result must not be marked as derived"
+    );
     assert_eq!(tensors["progress_mask"].dims(), &[1]);
     assert_eq!(tensors["aux_mask"].dims(), &[1]);
     let action_type = tensors["action_type"].to_vec2::<f32>().unwrap();
@@ -262,4 +267,123 @@ fn safetensors_writer_emits_expected_shapes() {
     std::fs::remove_file(format!("{}.manifest.json", paths[0].display())).unwrap();
     std::fs::remove_file(&paths[0]).unwrap();
     std::fs::remove_dir(&dir).unwrap();
+}
+
+/// Terminal-ish state built by hand: `(id, score, killed)` per tribe.
+/// Mirrors `ai::mcts_common::tests::terminal_game`.
+fn game_with_tribes(tribes: &[(i32, i32, bool)], game_over: bool) -> crate::game::Game {
+    let mut game = crate::game::Game::new();
+    game.state.tribes.clear();
+    for &(id, score, killed) in tribes {
+        game.state.tribes.insert(
+            id,
+            crate::states::TribeState {
+                id,
+                score,
+                killed_turn: if killed { 3 } else { 0 },
+                ..Default::default()
+            },
+        );
+    }
+    game.state.settings._game_over = game_over;
+    game
+}
+
+#[test]
+fn derives_elimination_winner_over_a_dead_score_leader() {
+    let game = game_with_tribes(&[(1, 40, false), (2, 900, true)], true);
+    let result = derive_result(&game).unwrap();
+    assert_eq!(result.winner_player_id, Some(1));
+    assert!(!result.draw);
+    assert_eq!(result.reason.as_deref(), Some("derived:elimination"));
+    assert_eq!(result.scores, BTreeMap::from([(1, 40), (2, 900)]));
+}
+
+#[test]
+fn derives_turn_limit_winner_from_score_among_the_living() {
+    let game = game_with_tribes(&[(1, 100, false), (2, 40, false), (3, 900, true)], true);
+    let result = derive_result(&game).unwrap();
+    assert_eq!(result.winner_player_id, Some(1));
+    assert_eq!(result.reason.as_deref(), Some("derived:scoreAtLimit"));
+}
+
+#[test]
+fn derives_draw_on_mutual_elimination() {
+    let game = game_with_tribes(&[(1, 100, true), (2, 40, true)], true);
+    let result = derive_result(&game).unwrap();
+    assert_eq!(result.winner_player_id, None);
+    assert!(result.draw);
+    assert_eq!(result.reason.as_deref(), Some("derived:mutualElimination"));
+}
+
+#[test]
+fn derives_draw_on_a_score_tie_at_the_turn_limit() {
+    let game = game_with_tribes(&[(1, 40, false), (2, 40, false)], true);
+    let result = derive_result(&game).unwrap();
+    assert_eq!(result.winner_player_id, None);
+    assert!(result.draw);
+    assert_eq!(result.reason.as_deref(), Some("derived:scoreTieAtLimit"));
+}
+
+#[test]
+fn refuses_to_derive_from_a_non_terminal_state() {
+    let game = game_with_tribes(&[(1, 100, false), (2, 40, false)], false);
+    let error = derive_result(&game).unwrap_err().to_string();
+    assert!(
+        error.contains("cannot derive a result"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn finish_derives_a_result_when_the_replay_has_none() {
+    let mut replay = replay_with(vec![ReplayCommand::EndTurn]);
+    replay.turns.push(ReplayTurn {
+        turn_number: replay.initial_state.settings.turn,
+        player_id: 2,
+        commands: vec![ReplayCommand::EndTurn],
+    });
+    assert!(replay.result.is_none());
+    let mut collector = crate::replay::training::TrainingCollector::new(&replay).unwrap();
+    let mut game = ReplayExecutor::execute_with_observer(&replay, &mut collector).unwrap();
+    game.state.tribes.get_mut(&2).unwrap().killed_turn = 3;
+
+    assert_eq!(
+        derive_result(&game).unwrap().reason.as_deref(),
+        Some("derived:elimination")
+    );
+    let samples = collector
+        .finish(&game, None, std::path::Path::new("derived.replay.json"))
+        .unwrap();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].value(), 1.0);
+    assert_eq!(samples[1].value(), -1.0);
+
+    let dir = std::env::temp_dir().join(format!("polyfish-derived-test-{}", std::process::id()));
+    let paths = crate::replay::training::write_training_files(&samples, &dir, 10).unwrap();
+    let manifest_path = format!("{}.manifest.json", paths[0].display());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(
+        manifest["derivedResultSourceFiles"],
+        serde_json::json!(["derived.replay.json"])
+    );
+    std::fs::remove_file(&manifest_path).unwrap();
+    std::fs::remove_file(&paths[0]).unwrap();
+    std::fs::remove_dir(&dir).unwrap();
+}
+
+#[test]
+fn finish_still_refuses_a_result_less_unfinished_replay() {
+    let replay = replay_with(vec![ReplayCommand::EndTurn]);
+    let mut collector = crate::replay::training::TrainingCollector::new(&replay).unwrap();
+    let game = ReplayExecutor::execute_with_observer(&replay, &mut collector).unwrap();
+    let error = match collector.finish(&game, None, std::path::Path::new("truncated.replay.json")) {
+        Ok(samples) => panic!("expected a refusal, got {} samples", samples.len()),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("cannot derive a result"),
+        "unexpected error: {error}"
+    );
 }

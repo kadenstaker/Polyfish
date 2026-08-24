@@ -16,7 +16,7 @@ use strum::IntoEnumIterator;
 use super::{
     ACTION_SCHEMA_VERSION, DATASET_SCHEMA_VERSION, FEATURE_SCHEMA_VERSION, REPLAY_SCHEMA_VERSION,
     Replay, ReplayCommand, ReplayError, ReplayMoveContext, ReplayObserver, ReplayResult,
-    validate_training_eligibility,
+    derive_result, validate_training_eligibility,
 };
 
 struct PendingSample {
@@ -55,11 +55,15 @@ impl TrainingCollector {
         result: Option<&ReplayResult>,
         source_file: &Path,
     ) -> Result<Vec<TrainingSample>, ReplayError> {
-        let result = result.ok_or_else(|| {
-            ReplayError::Training(
-                "behavior-cloning export requires replay.result for value labels".into(),
-            )
-        })?;
+        let result_is_derived = result.is_none();
+        let derived;
+        let result = match result {
+            Some(result) => result,
+            None => {
+                derived = derive_result(game)?;
+                &derived
+            }
+        };
         let total_cities = game
             .state
             .tribes
@@ -160,6 +164,7 @@ impl TrainingCollector {
                     .unwrap_or_else(|| vec![0.0; tech_order.len()]),
                 aux_mask: 1.0,
                 source_file: source_file.display().to_string(),
+                result_is_derived,
             });
         }
         Ok(out)
@@ -232,6 +237,8 @@ pub struct TrainingSample {
     aux_opp_tech: Vec<f32>,
     aux_mask: f32,
     source_file: String,
+    /// The value label came from `derive_result`, not from a captured result.
+    result_is_derived: bool,
 }
 
 impl TrainingSample {
@@ -288,6 +295,9 @@ pub struct DatasetManifest {
     pub move_option_dim: usize,
     pub num_samples: usize,
     pub source_files: Vec<String>,
+    /// Subset of `source_files` whose value labels were synthesized by
+    /// `derive_result` rather than read off a captured result.
+    pub derived_result_source_files: Vec<String>,
 }
 
 pub fn write_training_files(
@@ -339,6 +349,7 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
     let mut opp_tech = Vec::with_capacity(n * tech_dim);
     let mut aux_mask = Vec::with_capacity(n);
     let mut source_files = BTreeSet::new();
+    let mut derived_result_source_files = BTreeSet::new();
 
     for (row, sample) in samples.iter().enumerate() {
         spatial.extend_from_slice(&sample.features.spatial);
@@ -362,6 +373,9 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
         opp_tech.extend_from_slice(&sample.aux_opp_tech);
         aux_mask.push(sample.aux_mask);
         source_files.insert(sample.source_file.clone());
+        if sample.result_is_derived {
+            derived_result_source_files.insert(sample.source_file.clone());
+        }
     }
 
     let device = Device::Cpu;
@@ -412,6 +426,7 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
         move_option_dim: NUM_MOVE_OPTIONS,
         num_samples: n,
         source_files: source_files.into_iter().collect(),
+        derived_result_source_files: derived_result_source_files.into_iter().collect(),
     };
     let manifest_path = PathBuf::from(format!("{}.manifest.json", path.display()));
     let json = serde_json::to_vec_pretty(&manifest)

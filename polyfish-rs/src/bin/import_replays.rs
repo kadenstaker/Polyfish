@@ -55,6 +55,7 @@ struct Summary {
     valid_files: usize,
     invalid_files: usize,
     training_eligible_files: usize,
+    derived_result_files: usize,
     training_samples: usize,
     output_files: Vec<String>,
     failures: Vec<FileFailure>,
@@ -145,12 +146,17 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
             let mut collector = TrainingCollector::new(&replay)?;
+            let had_result = replay.result.is_some();
             match ReplayExecutor::execute_with_observer(&replay, &mut collector) {
                 Ok(game) => match collector.finish(&game, replay.result.as_ref(), path) {
                     Ok(mut samples) => {
                         summary.valid_files += 1;
                         summary.training_eligible_files += 1;
                         summary.training_samples += samples.len();
+                        if !had_result {
+                            summary.derived_result_files += 1;
+                            println!("DERIVED-RESULT {}", path.display());
+                        }
                         all_samples.append(&mut samples);
                         println!(
                             "VALID {} ({} samples)",

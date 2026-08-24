@@ -7,6 +7,7 @@ pub mod command;
 pub mod errors;
 pub mod executor;
 pub mod loader;
+pub mod outcome;
 pub mod paths;
 pub mod playback;
 pub mod recorder;
@@ -18,6 +19,7 @@ pub use command::ReplayCommand;
 pub use errors::{ReplayError, ReplayMoveContext};
 pub use executor::{NoopReplayObserver, ReplayExecutor, ReplayObserver};
 pub use loader::{load_replay, load_replay_reader, save_replay};
+pub use outcome::derive_result;
 pub use paths::{
     CANONICAL_REPLAY_SUFFIX, REPLAY_DIR, canonical_replay_file_name, is_canonical_replay_file,
     local_replay_path, sanitize_storage_key,
