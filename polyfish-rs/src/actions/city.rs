@@ -1,10 +1,9 @@
 //! City-related actions (population, territory)
 
-use crate::PlayerId;
 use crate::actions::discovery::discover_tiles;
 use crate::actions::{UndoCallback, chain_undos};
 use crate::coords::Coords;
-use crate::states::GameState;
+use crate::states::{GameState, PlayerId};
 
 /// Add population to a city
 ///
@@ -181,21 +180,27 @@ pub fn claim_territory(
         }
     }
 
-    // Update scores
-    let score_gain = crate::score::CITY_TERRITORY_SCORE * tiles_to_claim.len() as i32;
-    if let Some(tribe) = state.tribes.get_mut(&pov_id) {
-        tribe.score += score_gain;
-    }
-
-    // Deduction from old owners
+    // A tile is worth 20 plus whatever stands on it, to whoever owns it, and
+    // exactly once. So score the ownership *changes*, not the claim list: a
+    // tile the claimer already owned (its other city's territory, a city
+    // founded on ground it held) is already in its score (#40).
+    let mut score_gain = 0;
     let mut old_owner_deductions: Vec<(PlayerId, i32)> = Vec::new();
-    for (_idx, owner, _coords) in &old_owners {
-        if *owner != 0 && *owner != pov_id {
-            if let Some(old_tribe) = state.tribes.get_mut(owner) {
-                old_tribe.score -= crate::score::CITY_TERRITORY_SCORE;
-                old_owner_deductions.push((*owner, crate::score::CITY_TERRITORY_SCORE));
+    for (idx, old_owner, _coords) in &old_owners {
+        if *old_owner == pov_id {
+            continue;
+        }
+        let value = crate::score::tile_score(state, *idx);
+        score_gain += value;
+        if *old_owner != 0 {
+            if let Some(old_tribe) = state.tribes.get_mut(old_owner) {
+                old_tribe.score -= value;
+                old_owner_deductions.push((*old_owner, value));
             }
         }
+    }
+    if let Some(tribe) = state.tribes.get_mut(&pov_id) {
+        tribe.score += score_gain;
     }
 
     let num_newly_added = added_indices.len();
@@ -205,7 +210,6 @@ pub fn claim_territory(
             tribe.score -= score_gain;
         }
 
-        // Restore old owner scores
         for (owner, amount) in old_owner_deductions {
             if let Some(tribe) = s.tribes.get_mut(&owner) {
                 tribe.score += amount;
@@ -283,16 +287,19 @@ pub fn capture_city(state: &mut GameState, tile_idx: i32) -> Result<UndoCallback
                 }
             );
 
-            // Update tile
+            // Update tile. Ownership of the city tile is left to the territory
+            // claim below, so the old owner is charged for losing it like any
+            // other tile (#40).
             if let Some(tile) = state.tiles.get_mut(&tile_idx) {
-                tile.owner = pov_id;
                 if tile.capital_of > 0 {
                     tile.capital_of = pov_id;
                 }
             }
 
-            // Calculate score transfer value
-            let city_score = crate::score::get_city_score(&city);
+            // The city itself transfers here; its territory and the structures
+            // on it are re-priced by the ownership change in the territory
+            // claim below (#40).
+            let city_score = crate::score::city_core_score(&city);
 
             // Add to new owner
             if let Some(new_tribe) = state.tribes.get_mut(&pov_id) {
@@ -365,8 +372,6 @@ pub fn capture_city(state: &mut GameState, tile_idx: i32) -> Result<UndoCallback
                 restored.owner = tile_owner;
                 restored.name = city_name_old;
 
-                let city_score = crate::score::get_city_score(&restored);
-
                 // Undo score transfer - New Owner (sequential borrow)
                 if let Some(nt) = s.tribes.get_mut(&pov_id) {
                     nt.score -= city_score;
@@ -383,8 +388,12 @@ pub fn capture_city(state: &mut GameState, tile_idx: i32) -> Result<UndoCallback
                 }
             }));
 
-            // Claim territory
-            undos.push(claim_territory(state, &city._territory, tile_idx, true));
+            // Claim territory, the city's own tile included
+            let mut claimed = city._territory.clone();
+            if !claimed.contains(&tile_idx) {
+                claimed.push(tile_idx);
+            }
+            undos.push(claim_territory(state, &claimed, tile_idx, true));
             undos.push(discover_tiles(
                 state,
                 pov_id,
@@ -423,15 +432,17 @@ pub fn capture_city(state: &mut GameState, tile_idx: i32) -> Result<UndoCallback
             _territory: territory.clone(),
         };
 
+        // The territory it is created holding is scored by the claim below, and
+        // only for tiles that actually change hands (#40).
+        let created_score = crate::score::city_core_score(&created_city);
         if let Some(tribe) = state.tribes.get_mut(&pov_id) {
-            // New City Base (100)
-            tribe.score += crate::score::CITY_BASE_SCORE;
+            tribe.score += created_score;
             tribe.cities.push(created_city.clone());
         }
 
         undos.push(Box::new(move |s| {
             if let Some(tribe) = s.tribes.get_mut(&pov_id) {
-                tribe.score -= crate::score::CITY_BASE_SCORE;
+                tribe.score -= created_score;
                 tribe.cities.pop();
             }
         }));

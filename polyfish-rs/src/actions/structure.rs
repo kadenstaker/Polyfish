@@ -18,6 +18,26 @@ fn next_rng_xxhash(current_seed: &mut i64, initial_seed: i64) -> i64 {
     *current_seed
 }
 
+/// Move `delta` score to the tribe whose city territory holds `idx`, which is
+/// the tribe the canonical recompute prices the structure into. A structure
+/// outside every territory is worth nothing to anyone, so it scores nothing.
+fn adjust_structure_score(state: &mut GameState, idx: i32, delta: i32) -> UndoCallback {
+    if delta == 0 {
+        return Box::new(|_| {});
+    }
+    let Some(owner) = crate::score::territory_owner(state, idx) else {
+        return Box::new(|_| {});
+    };
+    if let Some(tribe) = state.tribes.get_mut(&owner) {
+        tribe.score += delta;
+    }
+    Box::new(move |s: &mut GameState| {
+        if let Some(t) = s.tribes.get_mut(&owner) {
+            t.score -= delta;
+        }
+    })
+}
+
 /// Create a structure at a tile
 pub fn create_structure(
     state: &mut GameState,
@@ -34,7 +54,7 @@ pub fn create_structure(
     };
 
     if structure_type != StructureType::Road {
-        state.structures.insert(idx, Some(structure));
+        state.structures.insert(idx, Some(structure.clone()));
     }
 
     // Valid references for move closure
@@ -64,17 +84,28 @@ pub fn create_structure(
         ));
     }
 
-    // Award score for structure (e.g. Monuments giving 400)
+    // Score the structure the way the canonical recompute does: monuments by
+    // `reward_score`, temples by level, credited to whoever's territory holds
+    // the tile - and drop whatever a replaced structure was worth (#40). A Road
+    // is a tile flag rather than an entry in `structures`, so it neither scores
+    // nor displaces what already stands there.
+    if structure_type != StructureType::Road {
+        let old_score = old_struct
+            .as_ref()
+            .and_then(|s| s.as_ref())
+            .map(crate::score::structure_score)
+            .unwrap_or(0);
+        let new_score = crate::score::structure_score(&structure);
+        undos.push(adjust_structure_score(state, idx, new_score - old_score));
+    }
+
     let settings = get_structure_setting(structure_type);
     if settings.reward_score > 0 {
         if let Some(tribe) = state.tribes.get_mut(&pov_id) {
-            tribe.score += settings.reward_score;
             tribe.built_unique_improvements.insert(structure_type);
         }
-        let score_gain = settings.reward_score;
         undos.push(Box::new(move |s| {
             if let Some(t) = s.tribes.get_mut(&pov_id) {
-                t.score -= score_gain;
                 t.built_unique_improvements.remove(&structure_type);
             }
         }));
@@ -118,21 +149,14 @@ pub fn destroy_structure(state: &mut GameState, idx: i32) -> UndoCallback {
     state.structures.shift_remove(&idx);
 
     let mut undos: Vec<UndoCallback> = Vec::new();
-    let pov_id = state.settings.current_player_turn_id;
 
-    // Handle score reduction (e.g. Monuments)
-    let settings = get_structure_setting(structure.structure_type);
-    if settings.reward_score > 0 {
-        if let Some(tribe) = state.tribes.get_mut(&pov_id) {
-            tribe.score -= settings.reward_score;
-        }
-        let score_loss = settings.reward_score;
-        undos.push(Box::new(move |s| {
-            if let Some(t) = s.tribes.get_mut(&pov_id) {
-                t.score += score_loss;
-            }
-        }));
-    }
+    // Score reduction, charged to the tribe the recompute credited it to -
+    // not to whoever happens to be moving (#40).
+    undos.push(adjust_structure_score(
+        state,
+        idx,
+        -crate::score::structure_score(&structure),
+    ));
 
     // Restore structure on undo
     let undo_structure = structure.clone();
@@ -360,6 +384,19 @@ pub fn capture_ruin(
                             u.health = crate::functions::get_unit_max_health(u);
                             u.passenger_type = Some(UnitType::Warrior);
                         }
+                        // The passenger is worth its own stars, and `summon_unit`
+                        // priced the carrier alone (#40).
+                        let passenger_score =
+                            crate::settings::units::get_unit_setting(UnitType::Warrior).cost
+                                * crate::score::UNIT_COST_SCORE;
+                        if let Some(tribe) = state.tribes.get_mut(&pov_id) {
+                            tribe.score += passenger_score;
+                        }
+                        undos.push(Box::new(move |s: &mut GameState| {
+                            if let Some(t) = s.tribes.get_mut(&pov_id) {
+                                t.score -= passenger_score;
+                            }
+                        }));
                     }
                 } else {
                     let unit_type = if let Some(t) = state.tribes.get(&pov_id) {
@@ -558,6 +595,20 @@ pub fn capture_ruin(
                                 u.veteran = old_vet;
                                 u.health = old_hp;
                                 u.passenger_type = old_pass;
+                            }
+                        }) as UndoCallback);
+
+                        // The passenger is worth its own stars, and `summon_unit`
+                        // priced the carrier alone (#40).
+                        let passenger_score =
+                            crate::settings::units::get_unit_setting(UnitType::Warrior).cost
+                                * crate::score::UNIT_COST_SCORE;
+                        if let Some(tribe) = s.tribes.get_mut(&pov_id) {
+                            tribe.score += passenger_score;
+                        }
+                        undos.push(Box::new(move |st: &mut GameState| {
+                            if let Some(t) = st.tribes.get_mut(&pov_id) {
+                                t.score -= passenger_score;
                             }
                         }) as UndoCallback);
                     }

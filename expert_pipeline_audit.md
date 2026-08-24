@@ -110,7 +110,7 @@ Newly open:
 | M5 misc measurement | FIXED (`config.json`'s live re-read is deliberate) | E1 metal GN keys | FIXED; compiles in CI, runtime unverified |
 | A1 `DETACH_VALUE_TRUNK` | REGISTERED, arm not run | E2 engine correctness | VERIFIED; 6 of 7 fixed |
 | A2 two reward conventions | FIXED | E3 hot-path allocation | OPEN (unchanged) |
-| A2b label vs win condition | OPEN (terminal sign fixed, #39; reweight not acted on) | T1 forward parity | FIXED (found a live candle bug) |
+| A2b label vs win condition | OPEN (terminal sign fixed #39, score parity fixed #40; reweight not acted on) | T1 forward parity | FIXED (found a live candle bug) |
 | | | T2 CI coverage | FIXED |
 | | | T3 misc testing/ops | MOSTLY FIXED (only the ability-block headroom is open; #23 closed the backup caller and the duplicated CSV reader) |
 | M6 replay capture path | PARTLY FIXED (new, #41/#44; Rust half landed, C# side unverified) | E4 duplicate legal moves | OPEN (new, #43) |
@@ -852,6 +852,33 @@ the elimination, turn-limit, dead-tribe and mutual-elimination cases.
 
 This does not resolve A2b: the *TD* label still reads raw `score` throughout the
 game. It removes the sign inversion at the endpoints only.
+
+#### Aug 23 · score now agrees with itself (#40)
+
+A2b's second prerequisite is closed. The probe landed first and fired on the
+first sample anyone took (`score_drift_frac 0.875` over 8 games at 45 turns);
+`examples/score_parity_fuzz` then charged each drift to the move that caused it
+and to the component of the recompute that moved, which named six sources:
+temples scored nothing at build (only their later growth did), a destroyed
+structure was charged to whoever happened to be moving, an embarking unit kept
+its old type's price, a Park taken twice scored twice incrementally and once
+canonically, a captured city transferred only its base score while its territory
+and structures moved with it, and a ruin's Rammership was priced without its
+Warrior passenger.
+
+Two of those are recompute-side, and fixing them changes what a score *is*:
+territory and the structures on it are now priced per distinct tile the tribe
+**owns**, where the old walk summed each city's `_territory` (two cities two
+tiles apart share entries — a monument between them counted 800), and a Park is
+counted once per reward taken rather than once per city. Every mutation site now
+reads the same `score.rs` helpers as the recompute. Parity is clean over 184k
+moves of random play across 200 seeds and all 15 tribes.
+
+This is a change to the reward/value currency itself: TD labels built before it
+carried up to ~3.6% of final score as drift, and archived `games_*.safetensors`
+are labelled under the old definition. It does not resolve A2b, which is still
+about score being the wrong *quantity* for Domination — but the reweight now
+lands on a self-consistent one.
 
 ### A3 · Optimizer and LR schedule reset every iteration
 **Status:** FIXED (`73dafb9`) · **CONFIRMED** · Effort: days

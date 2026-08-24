@@ -45,6 +45,22 @@ diagnosis) are unaffected; they were measured on the training log, not the
 ladder. The re-baseline is the first thing that should happen on the repaired
 instrument, and until it exists no EXP registered on Aug 18 can be closed out.
 
+### Addendum (Aug 23, 2026): the value currency changed under all of it (#40)
+
+`tribe.score` is what every TD label and every reward-aware backup is measured
+in, and the maintained field disagreed with the canonical recompute in 7 of 8
+games at campaign length (mean 132.5 points, ~1.8% of final score, max 3.6%).
+Six incremental sources were wrong and two recompute-side rules were: a
+structure on a tile two cities share was priced twice, and a Park taken more
+than once was priced once. Both sides now read one definition (`score.rs`), and
+random-play parity is clean over 184k moves.
+
+Every label in every existing `games_*.safetensors` was built under the old,
+drifting definition. That is a reason to cold-start rather than resume on the
+old buffer, and it is one more thing the first gauge reading is a baseline
+*for*. A2b (#38) still stands: score being self-consistent does not make it the
+right quantity for Domination.
+
 ## EXP 1: Auxiliary training heads (ownership / fog / SPT+5 / opponent tech)
 *Jul 9, 2026 · COMMITTED, watching*
 
