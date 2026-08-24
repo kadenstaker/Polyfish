@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand};
 use polyfish::replay::training::{TrainingCollector, TrainingSample, write_training_files};
 use polyfish::replay::{
-    DivergenceVerifier, MAX_SUPPORTED_GAME_VERSION, MIN_SUPPORTED_GAME_VERSION, PairObserver,
-    ReplayError, ReplayExecutor, VersionSupport, is_canonical_replay_file, load_replay,
+    CANONICAL_REPLAY_SUFFIX, DivergenceVerifier, MAX_SUPPORTED_GAME_VERSION,
+    MIN_SUPPORTED_GAME_VERSION, PairObserver, ReplayError, ReplayExecutor, VersionSupport,
+    convert_mod_payload, is_canonical_replay_file, is_legacy_mod_payload, load_replay, save_replay,
     validate_training_eligibility_with,
 };
 use serde::Serialize;
@@ -28,6 +29,15 @@ enum Command {
         output: PathBuf,
         #[arg(long, default_value_t = 50_000)]
         samples_per_file: usize,
+    },
+    /// Convert pre-canonical mod capture payloads into canonical replays.
+    ConvertLegacy {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        recursive: bool,
     },
 }
 
@@ -143,8 +153,97 @@ fn write_report(path: Option<&Path>, summary: &Summary) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rewrites every source payload under `input` as a canonical replay. The
+/// converter re-executes each capture, so a file that lands here replays.
+fn convert_legacy(input: &Path, output: &Path, recursive: bool) -> anyhow::Result<()> {
+    let files = legacy_payload_files(input, recursive)?;
+    fs::create_dir_all(output)?;
+    let mut converted = 0usize;
+    let mut failed = 0usize;
+    for path in &files {
+        let payload: serde_json::Value = match fs::read(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| Ok(serde_json::from_slice(&bytes)?))
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                eprintln!("INVALID [read] {}: {error}", path.display());
+                failed += 1;
+                continue;
+            }
+        };
+        if !is_legacy_mod_payload(&payload) {
+            eprintln!(
+                "SKIP {}: not a pre-canonical mod capture payload",
+                path.display()
+            );
+            continue;
+        }
+        match convert_mod_payload(&payload) {
+            Ok(replay) => {
+                let stem = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "capture".to_string());
+                let target = output.join(format!("{stem}{CANONICAL_REPLAY_SUFFIX}"));
+                save_replay(&replay, &target)?;
+                converted += 1;
+                println!(
+                    "CONVERTED {} -> {} ({} commands)",
+                    path.display(),
+                    target.display(),
+                    replay.command_count()
+                );
+            }
+            Err(error) => {
+                eprintln!("INVALID [convert] {}: {error}", path.display());
+                failed += 1;
+            }
+        }
+    }
+    println!("converted {converted} of {} payloads", files.len());
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} payloads failed to convert", files.len())
+    }
+    Ok(())
+}
+
+fn legacy_payload_files(input: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
+    if input.is_file() {
+        return Ok(vec![input.to_path_buf()]);
+    }
+    if !input.is_dir() {
+        anyhow::bail!(
+            "input {} is neither a file nor a directory",
+            input.display()
+        );
+    }
+    let max_depth = if recursive { usize::MAX } else { 1 };
+    let mut files: Vec<_> = WalkDir::new(input)
+        .min_depth(1)
+        .max_depth(max_depth)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "json") && !is_canonical_replay_file(path)
+        })
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Command::ConvertLegacy {
+        input,
+        output,
+        recursive,
+    } = &args.command
+    {
+        return convert_legacy(input, output, *recursive);
+    }
     let (common, export) = match &args.command {
         Command::Validate(common) => (common, None),
         Command::ExportTraining {
@@ -152,6 +251,7 @@ fn main() -> anyhow::Result<()> {
             output,
             samples_per_file,
         } => (common, Some((output.as_path(), *samples_per_file))),
+        Command::ConvertLegacy { .. } => unreachable!("handled above"),
     };
     let files = replay_files(&common.input, common.recursive)?;
     let mut summary = Summary {

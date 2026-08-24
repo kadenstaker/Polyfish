@@ -16,8 +16,9 @@ use polyfish::moves::{
     },
 };
 use polyfish::replay::{
-    REPLAY_DIR, Replay, ReplayExecutor, ReplayPlayback, canonical_replay_file_name,
-    is_canonical_replay_file, load_replay, local_replay_path,
+    REJECTED_REPLAY_DIR, REPLAY_DIR, Replay, ReplayExecutor, ReplayPlayback,
+    canonical_replay_file_name, convert_mod_payload, is_canonical_replay_file,
+    is_legacy_mod_payload, load_replay, local_replay_path, rejected_payload_path,
 };
 use polyfish::types::{
     AbilityType, CityRewardType, MapSize, StructureType, TechnologyType, TribeType, UnitType,
@@ -1167,19 +1168,11 @@ async fn check_replay_exists(Json(params): Json<CheckReplayParams>) -> Json<Valu
     }
 }
 
-async fn save_replay_endpoint(
-    State(_state): State<Arc<AppState>>,
-    body: Json<Value>,
-) -> Json<Value> {
-    let replay: Replay = match serde_json::from_value(body.0.clone()) {
+async fn save_replay_endpoint(State(_state): State<Arc<AppState>>, body: String) -> Json<Value> {
+    let replay = match accept_replay_payload(&body) {
         Ok(replay) => replay,
-        Err(error) => {
-            return replay_error_json(format!("Replay must use canonical schema v1: {error}"));
-        }
+        Err(reason) => return rejected_replay_json(&body, reason),
     };
-    if let Err(error) = ReplayExecutor::execute(&replay) {
-        return replay_error_json(error);
-    }
     // Create replays directory if not exists
     let _ = std::fs::create_dir_all(REPLAY_DIR);
 
@@ -1391,17 +1384,12 @@ async fn save_replay_endpoint(
 // instead of saving to the db, save to /replays
 async fn save_replay_local_endpoint(
     State(_state): State<Arc<AppState>>,
-    body: Json<Value>,
+    body: String,
 ) -> Json<Value> {
-    let replay: Replay = match serde_json::from_value(body.0.clone()) {
+    let replay = match accept_replay_payload(&body) {
         Ok(replay) => replay,
-        Err(error) => {
-            return replay_error_json(format!("Replay must use canonical schema v1: {error}"));
-        }
+        Err(reason) => return rejected_replay_json(&body, reason),
     };
-    if let Err(error) = ReplayExecutor::execute(&replay) {
-        return replay_error_json(error);
-    }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1508,6 +1496,63 @@ fn install_replay(state: &Arc<AppState>, replay: Replay, filename: String) -> Js
     let response = replay_playback_json(&playback, Some(&filename));
     *state.replay.lock().unwrap() = Some(playback);
     Json(response)
+}
+
+/// Accepts a canonical replay, or converts the mod's pre-canonical capture
+/// payload into one. Only a body that also re-executes is accepted, so what
+/// reaches disk is always replayable.
+fn accept_replay_payload(body: &str) -> Result<Replay, String> {
+    let payload: Value =
+        serde_json::from_str(body).map_err(|error| format!("Replay body is not JSON: {error}"))?;
+    let replay = match serde_json::from_value::<Replay>(payload.clone()) {
+        Ok(replay) => replay,
+        Err(error) => {
+            if !is_legacy_mod_payload(&payload) {
+                return Err(format!("Replay must use canonical schema v1: {error}"));
+            }
+            convert_mod_payload(&payload)
+                .map_err(|error| format!("Mod capture payload could not be converted: {error}"))?
+        }
+    };
+    ReplayExecutor::execute(&replay).map_err(|error| error.to_string())?;
+    Ok(replay)
+}
+
+/// Parks a refused body next to the reason it was refused. A capture session
+/// the server cannot accept is still recoverable from disk.
+fn quarantine_payload(body: &str, reason: &str) -> Option<String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let name = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|payload| {
+            ["/uuid", "/gameState/settings/gameName", "/metadata/gameId"]
+                .iter()
+                .find_map(|pointer| payload.pointer(pointer).and_then(Value::as_str))
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    std::fs::create_dir_all(REJECTED_REPLAY_DIR).ok()?;
+    let path = rejected_payload_path(&name, timestamp);
+    std::fs::write(&path, body).ok()?;
+    let _ = std::fs::write(path.with_extension("txt"), reason);
+    Some(path.to_string_lossy().into_owned())
+}
+
+fn rejected_replay_json(body: &str, reason: String) -> Json<Value> {
+    match quarantine_payload(body, &reason) {
+        Some(path) => {
+            println!("\u{274c} Rejected replay payload quarantined at {path}: {reason}");
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("{reason} (payload quarantined at {path})"),
+                "quarantined": path
+            }))
+        }
+        None => replay_error_json(format!("{reason} (payload could not be quarantined)")),
+    }
 }
 
 fn replay_error_json(error: impl std::fmt::Display) -> Json<Value> {

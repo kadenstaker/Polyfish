@@ -15,6 +15,17 @@ namespace PolyfishAI.src
         public static new ManualLogSource Logger { get; private set; } = null!;
         public static string LastExitButtonPath { get; set; } = "Canvas/HUDScreen/ButtonBar/NextTurnButton";
 
+        /// Capture-rig paths. Set POLYFISH_SCRAPER_DATA / POLYFISH_REPLAY_QUEUE to
+        /// run the rig anywhere; the fallbacks are the original hardcoded ones.
+        public static string ScraperDataPath =>
+            System.Environment.GetEnvironmentVariable("POLYFISH_SCRAPER_DATA")
+            ?? "/home/henry/Desktop/Coding/PolyAI/polyfish-scraper/data/";
+        public static string ReplaysAllPath =>
+            System.IO.Path.Combine(ScraperDataPath, "replays_all.txt");
+        public static string ReplayQueuePath =>
+            System.Environment.GetEnvironmentVariable("POLYFISH_REPLAY_QUEUE")
+            ?? "/tmp/polyfish_replays.txt";
+
         public static int TargetExplorerCount = 0;
         public static int DiffedExplorerCount = 0;
         public static List<int> ExplorerIndices = new();
@@ -184,7 +195,7 @@ namespace PolyfishAI.src
                             {
                                 try 
                                 {
-                                    string fails_path = "/home/henry/Desktop/Coding/PolyAI/polyfish-scraper/data/replays_all.txt";
+                                    string fails_path = PolyfishPlugin.ReplaysAllPath;
                                     if (File.Exists(fails_path))
                                     {
                                         var lines = new List<string>(File.ReadAllLines(fails_path));
@@ -366,10 +377,10 @@ namespace PolyfishAI.src
 
         public ReplaySequencer()
         {
-            LoadReplaysFromFile("/tmp/polyfish_replays.txt");
-            
+            LoadReplaysFromFile(PolyfishPlugin.ReplayQueuePath);
+
             // Scraper data sources
-            string scraperDataPath = "/home/henry/Desktop/Coding/PolyAI/polyfish-scraper/data/";
+            string scraperDataPath = PolyfishPlugin.ScraperDataPath;
             if (Directory.Exists(scraperDataPath))
             {
                 foreach (var file in Directory.GetFiles(scraperDataPath, "replays_*.txt"))
@@ -430,7 +441,7 @@ namespace PolyfishAI.src
                         State = ReplaySequencerState.Idle;
                         PolyfishPlugin.Logger.LogInfo("[ReplaySequencer] Queue empty. Finished automating replays.");
                         PolyfishPlugin.CurrentReplayUUID = null;
-                        try { File.WriteAllText("/tmp/polyfish_replays.txt", ""); } catch {}
+                        try { File.WriteAllText(PolyfishPlugin.ReplayQueuePath, ""); } catch {}
                         break;
                     }
                     State = ReplaySequencerState.CheckingDB;
@@ -457,7 +468,7 @@ namespace PolyfishAI.src
                                     Task.Run(() => {
                                         try 
                                         {
-                                            string fails_path = "/home/henry/Desktop/Coding/PolyAI/polyfish-scraper/data/replays_all.txt";
+                                            string fails_path = PolyfishPlugin.ReplaysAllPath;
                                             if (File.Exists(fails_path))
                                             {
                                                 var lines = new List<string>(File.ReadAllLines(fails_path));
@@ -565,7 +576,7 @@ namespace PolyfishAI.src
                     Task.Run(() => {
                         try 
                         {
-                            string fails_path = "/home/henry/Desktop/Coding/PolyAI/polyfish-scraper/data/replays_all.txt";
+                            string fails_path = PolyfishPlugin.ReplaysAllPath;
                             if (File.Exists(fails_path))
                             {
                                 var lines = new List<string>(File.ReadAllLines(fails_path));

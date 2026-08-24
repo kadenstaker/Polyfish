@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 
 pub const REPLAY_DIR: &str = "replays";
 pub const CANONICAL_REPLAY_SUFFIX: &str = ".replay.json";
+/// Where a payload the save endpoints refused is parked, so a rejection costs
+/// a capture session nothing.
+pub const REJECTED_REPLAY_DIR: &str = "replays/rejected";
+pub const REJECTED_PAYLOAD_SUFFIX: &str = ".rejected.json";
 
 /// Lowercased `[a-z0-9_]`; every other run of characters, `-` included,
 /// collapses to a single `-`. Never empty, so the stem always names something.
@@ -47,4 +51,15 @@ pub fn local_replay_path(game_name: &str, timestamp: u64) -> PathBuf {
 
 pub fn is_canonical_replay_file(path: &Path) -> bool {
     path.to_string_lossy().ends_with(CANONICAL_REPLAY_SUFFIX)
+}
+
+/// The quarantine file for a payload that could not be accepted. Its sibling
+/// `<stem>.error.txt` holds the reason.
+pub fn rejected_payload_path(game_name: &str, timestamp: u64) -> PathBuf {
+    Path::new(REJECTED_REPLAY_DIR).join(format!(
+        "{}_{}{}",
+        sanitize_storage_key(game_name),
+        timestamp,
+        REJECTED_PAYLOAD_SUFFIX
+    ))
 }
