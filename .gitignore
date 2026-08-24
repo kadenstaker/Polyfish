@@ -71,3 +71,10 @@ polyfish-rs/.current_run
 !polyfish-rs/ladder.json
 polyfish-rs/*.json.tmp
 polyfish-rs/.anchor_decay_start
+
+# Runtime / personal artifacts (issue #57)
+cache/
+polyfish-rs/saved_state.json
+*.css.bak
+**/game_old.css
+
