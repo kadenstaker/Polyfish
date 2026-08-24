@@ -106,9 +106,30 @@ while true; do
             echo "$(date): Conditions met (idle for ${IDLE_SECS}s)."
             start_training
         elif ! kill -0 "$TRAIN_PID" 2>/dev/null; then
-            echo "$(date): Training exited on its own. Restarting..."
             wait "$TRAIN_PID" 2>/dev/null
-            start_training
+            TRAIN_STATUS=$?
+            TRAIN_PID=""
+            # The loop's exit codes are its safety mechanism: it aborts nonzero on a
+            # failed gauge reading, anchor snapshot or link match, and exits 3 on a
+            # plateau stop. Restarting through either would undo the decision - a
+            # blind retry loop past a fatal abort, or training on past the plateau
+            # the gate exists to catch. Only a clean finish is a restart.
+            case "$TRAIN_STATUS" in
+                0)
+                    echo "$(date): Training finished its iteration budget. Restarting..."
+                    start_training
+                    ;;
+                3)
+                    echo "$(date): PLATEAU STOP - the gauge says this run has stopped improving."
+                    echo "$(date): Not restarting. See polyfish-rs/ladder.json."
+                    exit 0
+                    ;;
+                *)
+                    echo "$(date): Training ABORTED (exit $TRAIN_STATUS). Not restarting." >&2
+                    echo "$(date): See polyfish-rs/session.log - a failed gauge reading is fatal by design." >&2
+                    exit 1
+                    ;;
+            esac
         fi
     else
         if [[ -n "$TRAIN_PID" ]]; then

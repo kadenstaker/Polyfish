@@ -883,6 +883,7 @@ do
         elif [ "$GAUGE_ACTION" = "stop" ]; then
             refit_elo
             rm -f "$GAUGE_LOG"
+            PLATEAU_STOP=1
             echo "=================================================="
             echo "PLATEAU STOP at iteration $i: two consecutive 8-reading"
             echo "windows flat-or-down with slope <= 0 vs the active anchor"
@@ -950,3 +951,10 @@ do
     fi
 
 done
+
+# A plateau stop is a decision, not a spent iteration budget. Exit distinctly so a
+# supervisor that restarts on a clean finish does not restart straight back into
+# the same verdict (#56).
+if [ "${PLATEAU_STOP:-0}" = "1" ]; then
+    exit 3
+fi

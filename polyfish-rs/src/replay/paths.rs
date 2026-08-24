@@ -53,8 +53,8 @@ pub fn is_canonical_replay_file(path: &Path) -> bool {
     path.to_string_lossy().ends_with(CANONICAL_REPLAY_SUFFIX)
 }
 
-/// The quarantine file for a payload that could not be accepted. Its sibling
-/// `<stem>.error.txt` holds the reason.
+/// The quarantine file for a payload that could not be accepted.
+/// [`rejected_reason_path`] names the sibling that holds the reason.
 pub fn rejected_payload_path(game_name: &str, timestamp: u64) -> PathBuf {
     Path::new(REJECTED_REPLAY_DIR).join(format!(
         "{}_{}{}",
@@ -62,4 +62,28 @@ pub fn rejected_payload_path(game_name: &str, timestamp: u64) -> PathBuf {
         timestamp,
         REJECTED_PAYLOAD_SUFFIX
     ))
+}
+
+/// Output stem for one converted payload. `--recursive` flattens a tree into one
+/// directory, so the stem carries the path relative to `input`: two captures named
+/// the same in different subdirectories would otherwise overwrite each other, and
+/// the second would still be reported as converted.
+pub fn converted_payload_stem(input: &Path, path: &Path) -> String {
+    let relative = path
+        .strip_prefix(input)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new(path.file_name().unwrap_or(path.as_os_str())));
+    let joined = relative
+        .with_extension("")
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("_");
+    sanitize_storage_key(&joined)
+}
+
+/// The sibling of [`rejected_payload_path`] holding why the payload was refused.
+pub fn rejected_reason_path(payload_path: &Path) -> PathBuf {
+    payload_path.with_extension("txt")
 }

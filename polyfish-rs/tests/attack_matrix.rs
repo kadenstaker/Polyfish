@@ -4,7 +4,10 @@
 //! block and the melee move-in were all reachable only through the random-move fuzz.
 //!
 //! States are hand-built on flat Field terrain so `get_defense_bonus` is exactly 1.0
-//! and every expected number below is the bare `calculate_combat` formula.
+//! and every expected number below is the bare `calculate_combat` formula. One
+//! exception: a poisoned defender takes the penalty twice - defence scales by 0.7
+//! *and* the 1.0 bonus is rewritten to 0.5 (`functions.rs:469`) - which is why the
+//! double-attack case's second hit does not re-derive from a 1.0 bonus.
 
 use polyfish::actions::units::{attack_unit, calculate_combat};
 use polyfish::coords::Coords;

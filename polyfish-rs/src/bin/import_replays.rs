@@ -3,8 +3,8 @@ use polyfish::replay::training::{TrainingCollector, TrainingSample, write_traini
 use polyfish::replay::{
     CANONICAL_REPLAY_SUFFIX, DivergenceVerifier, MAX_SUPPORTED_GAME_VERSION,
     MIN_SUPPORTED_GAME_VERSION, PairObserver, ReplayError, ReplayExecutor, VersionSupport,
-    convert_mod_payload, is_canonical_replay_file, is_legacy_mod_payload, load_replay, save_replay,
-    validate_training_eligibility_with,
+    convert_mod_payload, converted_payload_stem, is_canonical_replay_file, is_legacy_mod_payload,
+    load_replay, save_replay, validate_training_eligibility_with,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -181,12 +181,15 @@ fn convert_legacy(input: &Path, output: &Path, recursive: bool) -> anyhow::Resul
         }
         match convert_mod_payload(&payload) {
             Ok(replay) => {
-                let stem = path
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "capture".to_string());
-                let target = output.join(format!("{stem}{CANONICAL_REPLAY_SUFFIX}"));
-                save_replay(&replay, &target)?;
+                let target = output.join(format!(
+                    "{}{CANONICAL_REPLAY_SUFFIX}",
+                    converted_payload_stem(input, path)
+                ));
+                if let Err(error) = save_replay(&replay, &target) {
+                    eprintln!("INVALID [write] {}: {error}", target.display());
+                    failed += 1;
+                    continue;
+                }
                 converted += 1;
                 println!(
                     "CONVERTED {} -> {} ({} commands)",

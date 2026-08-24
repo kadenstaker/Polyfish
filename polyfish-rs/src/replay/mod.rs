@@ -25,8 +25,8 @@ pub use loader::{load_replay, load_replay_reader, save_replay};
 pub use outcome::derive_result;
 pub use paths::{
     CANONICAL_REPLAY_SUFFIX, REJECTED_PAYLOAD_SUFFIX, REJECTED_REPLAY_DIR, REPLAY_DIR,
-    canonical_replay_file_name, is_canonical_replay_file, local_replay_path, rejected_payload_path,
-    sanitize_storage_key,
+    canonical_replay_file_name, converted_payload_stem, is_canonical_replay_file,
+    local_replay_path, rejected_payload_path, rejected_reason_path, sanitize_storage_key,
 };
 pub use playback::ReplayPlayback;
 pub use recorder::ReplayRecorder;

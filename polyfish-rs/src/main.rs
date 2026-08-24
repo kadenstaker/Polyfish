@@ -19,6 +19,7 @@ use polyfish::replay::{
     REJECTED_REPLAY_DIR, REPLAY_DIR, Replay, ReplayExecutor, ReplayPlayback,
     canonical_replay_file_name, convert_mod_payload, is_canonical_replay_file,
     is_legacy_mod_payload, load_replay, local_replay_path, rejected_payload_path,
+    rejected_reason_path,
 };
 use polyfish::types::{
     AbilityType, CityRewardType, MapSize, StructureType, TechnologyType, TribeType, UnitType,
@@ -1537,7 +1538,7 @@ fn quarantine_payload(body: &str, reason: &str) -> Option<String> {
     std::fs::create_dir_all(REJECTED_REPLAY_DIR).ok()?;
     let path = rejected_payload_path(&name, timestamp);
     std::fs::write(&path, body).ok()?;
-    let _ = std::fs::write(path.with_extension("txt"), reason);
+    let _ = std::fs::write(rejected_reason_path(&path), reason);
     Some(path.to_string_lossy().into_owned())
 }
 
