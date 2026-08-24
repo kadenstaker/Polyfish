@@ -32,6 +32,72 @@ carry the file:line citations and the re-verify command as it stands today. The
 original `# Verify` snippets are kept as written — for a FIXED item they now
 report the opposite of what their trailing comment predicts.
 
+### Aug 23, 2026 — third wave
+
+Seventeen issues landed (#6, #8, #23, #41–#48, #51–#57). None of them moves the
+headline: **still no gauge reading on the repaired instrument.** What changed is
+that four audit items closed or narrowed and three new open items were opened.
+
+Closed or narrowed:
+
+- **M3** — the paired analysis is landed (#6). A reading taken with a dump now
+  carries a per-seed `paired` block; `rho` is still unmeasured because no gauge
+  run has produced a dump. `GAUGE_GAMES` is untouched at 32 seeds / 64 games and
+  is the only M3 item left.
+- **M5** — `elo.py` is no longer orphaned (#8). The loop refits it after every
+  reading into `elo_ratings.json`, the dashboard serves it, and the fit's player
+  identity carries the search budget so two budgets are never chained as one
+  player.
+- **T3** — the backup script has a caller (#23) and the dashboard CSV reader is
+  one function instead of three. Only the mapper's ability-block headroom is
+  open.
+- **T2** — the smoke's push filter covers the runtime seam, forward parity runs
+  on three checkpoints rather than one, `tch_parity` executes in CI, the
+  correctness clippy gate has no global carve-outs (#48), and a second nightly
+  runs the undo probes (#47).
+
+Newly open:
+
+- **`generate_legal_moves` emits duplicate identical moves.** It walks each tile
+  once per city whose `_territory` contains it (`src/moves/build.rs`, and the
+  same shape in harvest generation), so a tile inside two of a player's city
+  territories yields the same Build or Harvest move twice. Reproduced on
+  Tiny/Lakes seed 5 turn 3 (tile 25, in the territory of both city 24 and city
+  15) and seed 1 turn 9 (`Build Sawmill at 67`). MCTS splits its prior across the
+  duplicates and the decomposed policy target double-counts that move; replays
+  carrying such a command used to die as `AmbiguousCommand`.
+  `replay/executor.rs` now collapses indistinguishable matches so the replay
+  path survives, but the movegen defect is unfixed — deduplicating legal moves
+  is a training-behaviour change and needs a registered experiment (#43).
+  Re-verify: `cargo test --no-default-features --test replay_round_trip --
+  --ignored --nocapture` and read the `duplicate-move commands:` count on the
+  coverage line (4 across 20 seeds today). A count of 0 means movegen no longer
+  emits duplicates — at which point the paired `duplicate_matches > 0` assertion
+  in the non-ignored test is what needs dropping.
+- **#44 (replay version drift) — cheap layer landed, deep layer inert.**
+  `replay/validator.rs` declares the supported game-version range and
+  `validate_training_eligibility` refuses out-of-range captures
+  (`import_replays --allow-version-drift` to override); `FileFailure` carries the
+  version and the summary carries `failuresByVersion`. The Rust half of the
+  divergence check landed too — `replay/verify.rs`'s `DivergenceVerifier` checks
+  `metadata.sourceDiagnostics.endTurnCheckpoints` before each EndTurn — and is
+  inert, because nothing writes those checkpoints. Porting `polyfish-mod` to
+  emit them needs a Windows/Steam/BepInEx run this repo cannot do. Re-verify:
+  `cd polyfish-rs && cargo test --no-default-features --lib replay::`.
+- **#41 (mod capture path) — Rust half landed, C# half not verifiable here.**
+  `/replay/save` and `/replay/save-local` now convert the mod's pre-canonical
+  payload (`src/replay/legacy.rs`) and quarantine any body they refuse under
+  `replays/rejected/`, so a capture session survives a rejection without
+  rebuilding the mod. A real v114 capture is committed as
+  `polyfish-rs/tests/fixtures/mod_replay_legacy_v114.json` and all 247 of its
+  commands convert and replay. Still open, and not verifiable without a
+  dotnet/BepInEx toolchain: `PolyfishAPI.SaveReplaySync` is fire-and-forget and
+  never inspects the response (the server answers 200 even on refusal), and
+  `PolyfishAI.csproj` pins `<GamePath>` to one machine. Note the capture path
+  being restored does **not** unblock the `teachers/` imitation pipeline:
+  `validate_training_eligibility` is 11×11-only (`features::MAP_SIZE`) and real
+  games are 14×14 or larger.
+
 | Item | Status | Item | Status |
 |---|---|---|---|
 | P1 blocker flags | FIXED | A3 optimizer reset | FIXED |
@@ -39,14 +105,15 @@ report the opposite of what their trailing comment predicts.
 | P3 action-head width | FIXED (Resign still ungenerated) | A5 misc signal | PARTLY FIXED |
 | M1 seed control | FIXED | R1 policy rank-1 bottleneck | OPEN (verified) |
 | M2 gauge/self-play mismatch | FIXED | R2 player state | OPEN |
-| M3 reading resolution | PARTLY FIXED | R3 product-of-marginals | OPEN (verified; dedup fixed) |
+| M3 reading resolution | PARTLY FIXED (paired analysis landed; `GAUGE_GAMES` still 32 seeds / 64 games) | R3 product-of-marginals | OPEN (verified; dedup fixed) |
 | M4 gauge game length | FIXED | R4 receptive field | REFINED — no action |
-| M5 misc measurement | PARTLY FIXED | E1 metal GN keys | FIXED; compiles in CI, runtime unverified |
+| M5 misc measurement | FIXED (`config.json`'s live re-read is deliberate) | E1 metal GN keys | FIXED; compiles in CI, runtime unverified |
 | A1 `DETACH_VALUE_TRUNK` | REGISTERED, arm not run | E2 engine correctness | VERIFIED; 6 of 7 fixed |
 | A2 two reward conventions | FIXED | E3 hot-path allocation | OPEN (unchanged) |
 | A2b label vs win condition | OPEN (terminal sign fixed, #39; reweight not acted on) | T1 forward parity | FIXED (found a live candle bug) |
 | | | T2 CI coverage | FIXED |
-| | | T3 misc testing/ops | MOSTLY FIXED |
+| | | T3 misc testing/ops | MOSTLY FIXED (only the ability-block headroom is open; #23 closed the backup caller and the duplicated CSV reader) |
+| M6 replay capture path | PARTLY FIXED (new, #41/#44; Rust half landed, C# side unverified) | E4 duplicate legal moves | OPEN (new, #43) |
 
 ## How to use this file
 
@@ -328,6 +395,9 @@ not clear the freeze bar.
 
 The number that calculation returns is the finding: **detecting +8pp at a ≈33%
 baseline, 80% power, α=0.05, needs ~571 games per reading.** The gauge spends 64.
+For the +1pp EXP_ELO_002 actually observed the requirement is ~34,970 games — not
+a budget question but a statement that the difference is unmeasurable at any
+budget this project will spend.
 It is ~9× too small for the bar EXP_ELO_002 registered against it — not
 marginally underpowered, an order of magnitude. The observed +1pp and the
 30.7→36.7% within-run drift were never separable from noise by a single reading.
@@ -337,13 +407,45 @@ marginally underpowered, an order of magnitude. The observed +1pp and the
 1. **Trend, not readings.** The plateau gate already pools eight readings (~512
    games), which is why it is meaningful at this budget. Any verdict drawn from
    *one* reading is not.
-2. **A paired analysis.** M1 means both sides now play the same seeded map set,
-   so the per-seed outcomes are correlated and a paired test needs materially
-   fewer games than the unpaired ~571. Nothing measures that correlation yet;
-   `arena --dump-stats-dir` already writes per-game records, so it is
-   computable without new match compute.
-3. **Raise `GAUGE_GAMES`.** Honest and linear in gauge wall-clock. Decide it
-   against the effect size, not against how long it feels acceptable to wait.
+2. **A paired analysis.** LANDED (#6). `ladder.py._paired_from_stats` buckets an
+   `arena --dump-stats-dir` by seed, keeps the seeds that still hold both halves
+   of their side swap, and scores each pair from the model's side; the interval
+   comes from the sample variance of the per-seed scores, so it is as tight as
+   the swap actually made it and costs no new match compute. Every reading taken
+   with a dump carries it under `paired` (pair counts, the paired win rate and
+   difference with their intervals, `rho`, and `games_needed`), the loop echoes
+   it beside the unpaired figure, and `ladder.py paired --stats-dir DIR` re-reads
+   any retained dump without replaying its match. **Recorded only** — the freeze
+   bar and the plateau rule are EXP-registered tests on the unpaired counts and
+   neither reads it; `tests/test_ladder.py::PairedReadingTest` pins that a
+   reading with a dump and one without give the same action, win rate, interval
+   and Elo.
+
+   The point is not only tightness. When a map correlates a seed's two halves
+   (`rho` > 0) the unpaired Wilson interval is *overconfident* — it assumes 2N
+   independent trials it does not have; when the swap cancels map bias
+   (`rho` < 0) it is wastefully wide. Either way the paired interval is the
+   correct one, and at ~32 pairs it pays a t-correction that makes it strictly
+   narrower only once `rho` is comfortably negative.
+
+   `rho` itself is **unmeasured**: no gauge run has produced a dump for it to
+   read. The next reading measures it.
+
+```bash
+# Re-verify
+cd polyfish-rs && python3 -m unittest tests.test_ladder.PairedReadingTest
+cd polyfish-rs && python3 ladder.py paired --stats-dir replays/gauge_stats/<run>_iter<N>
+```
+
+3. **Raise `GAUGE_GAMES`.** STILL OPEN — the only remaining M3 item, and a budget
+   decision rather than an engineering one. It is now costed: the paired
+   estimator needs (1 + rho) × the unpaired figure, so detecting +8pp at a ~33%
+   baseline needs 571 games at rho=0, 457 at rho=-0.2, 343 at rho=-0.4 and 229 at
+   rho=-0.6 (`ladder.py power --baseline 0.33 --effect 0.08 --rho -0.4`). The
+   gauge spends 64, so even an implausibly strong pairing leaves it 3.6× short,
+   and a realistic one leaves it 7-9× short. Honest and linear in gauge
+   wall-clock. Decide it against the effect size, not against how long it feels
+   acceptable to wait.
 
 ### M4 · Gauge plays a shorter game than training generates
 **Status:** FIXED (`73dafb9`) · **CONFIRMED** · Effort: hours
@@ -363,11 +465,25 @@ The gauge never passes `--max-turns`, so arena uses its default of 30
 (`arena.rs:57`). Late-game strength is outside the measured window.
 
 ### M5 · Other measurement gaps
-**Status:** PARTLY FIXED · **FLAGGED**
+**Status:** FIXED (`config.json`'s live re-read is deliberate) · **FLAGGED**
 
 FIXED: `elo.py` now fits ratings from `ladder.json`'s own readings against its
 Elo-0 greedy floor (`elo.py:10-11`, `:84-98`), so it grades the same matches the
-ladder records. `value_r2` gained a holdout split **by game file**, not by
+ladder records — and it is no longer orphaned (#8): `run_training_loop.sh`'s
+gauge block runs `refit_elo` after every reading, writing `elo_ratings.json`,
+which `/api/elo-ladder` serves to the dashboard under a `ratings` key beside the
+per-reading `elo_est`. The refit is non-fatal on purpose — the fit is derived
+data, recomputable from `ladder.json`, unlike the reading it follows — so
+`scripts/smoke_train_loop.sh` asserts the file lands with `greedy` pinned at 0,
+since a quiet non-fatal step is how this got orphaned in the first place. The
+fit's player identity now carries the search budget on the same
+`(mcts, gumbel_k, max_turns)` key `ladder.py._budget_key` uses, so a 16-sim
+stint and a 64-sim stint are no longer pooled as one player; `link` readings stay
+untagged so an anchor is one node and a budget change cannot cut the graph in
+two, and the audit row now records the `max_turns` it was already played at so
+an audit and its gauge stay one player. Ratings previously produced by a hand-run
+`elo.py` will move where a ladder spans budgets — the fit is recomputed from
+scratch every run, so nothing is corrupted. `value_r2` gained a holdout split **by game file**, not by
 position (`train.py:475-494`), reported next to the in-sample number so
 underfitting and overfitting can be told apart; the dashboard plots both. `arena`
 records every game it drops in its per-game JSON and the loop no longer ignores
@@ -448,8 +564,14 @@ ALSO FIXED: the record now says what it was taken under.
 
 STILL OPEN: the search-budget confound is contained, not resolved — restricting
 the window is correct but it means a budget change silently shortens the plateau
-series rather than flagging it. And no reading has yet been taken with any of
-this in place.
+series rather than flagging it. The joint fit now forks players by budget and
+prints a note when a ladder spans more than one, but its anchor nodes still pool
+every budget they were played at: that is what keeps the graph connected across
+a budget change, and it is an assumption, not a measurement. `config.json` is
+still re-read inside the iteration loop — deliberately; it is the dashboard's
+live-control surface — and the mitigation is that every CSV row records the
+settings it actually ran at, not that the file is frozen. And no reading has yet
+been taken with any of this in place.
 
 - `elo.py` is orphaned and anchored to a player that never plays; the ratings
   actually used are un-intervalled chained win rates.
@@ -585,6 +707,16 @@ Also: `GOOD_BOT_FINAL_SCORE` (`self_play.rs:37`) is dead while `REL_W` is 1.0.
 
 ### A2b · The value label is built from `score`, but training plays Domination
 **Status:** OPEN — measured, not acted on · **CONFIRMED** · Effort: days · *Raised by the owner*
+
+**Aug 23 (#42):** the score proxy was **not** extended into the teacher path.
+`replay::outcome::derive_result` now synthesizes a missing `ReplayResult` for
+export, but it decides on survival first and falls back to score only for a
+genuine turn-limit terminal, among living tribes only, and it refuses outright
+unless `functions::is_game_over` holds — so a truncated capture cannot become a
+score-proxy label. Note the line reference below (`self_play.rs:939`) is stale:
+the winner resolution now sits at `self_play.rs:1031-1041`, and it still
+disagrees with the living-only rule on two edge cases (it maxes over dead tribes
+too, and never reports a draw), registered as EXP_LABEL_003.
 
 **Aug 18:** the recommended reweight has NOT landed. `src/ai/reward.rs` still
 reads only `t.score` (`score_snapshot`, `:54`); there is no army-value term
@@ -983,9 +1115,10 @@ per-claim outcome is below; the original list follows unchanged.
   belief-state army rather than moving units the search state has erased. Sign
   handling was audited across all backends — `mcts_zero` negates a handover
   child before comparing siblings (`src/ai/mcts_zero.rs:57`,
-  `mcts_common::edge_hands_over` `:159`), the plain `mcts.rs` minimises at
-  opponent nodes (`:72`), and Gumbel's tree reuse refuses to re-root across a
-  handover (`src/ai/gumbel_mcts.rs:1290`). **Default is OFF and nothing in
+  `mcts_common::edge_hands_over` `:159`), the plain `mcts.rs` minimised at
+  opponent nodes (`:72` — that file was deleted unused in #57, so a re-audit
+  finds two sites, not three), and Gumbel's tree reuse refuses to re-root across
+  a handover (`src/ai/gumbel_mcts.rs:1290`). **Default is OFF and nothing in
   `run_training_loop.sh` sets it** — registered as EXP_SEARCH_001, unmeasured.
   `arena --adversarial` grades it.
 - **`max_turns_ahead` ignores its `max_turns` argument** — CONFIRMED. FIXED:
@@ -1124,6 +1257,30 @@ reading — which is the seam all three blockers hid in. The smoke also forces t
 anchor-freeze and audit branches, and the contract check covers the shell's
 python CLIs per subcommand (#35).
 
+**Second pass (#48):** the smoke's push filter now covers `src/ai/**`,
+`src/game.rs`, `src/moves/**` and the manifests, so a runtime-shaped break no
+longer waits for the nightly; the blocking forward-parity job compares a
+seeded-perturbation fixture and a migrated legacy fixture as well as the base,
+because a fresh `init_model.py` checkpoint has identity affines and zero biases
+and hides that whole class of drift (measured: the base moves 0.0 when every
+affine and bias is dropped, the perturbed one ~9); `examples/tch_parity.rs` now
+runs, advisory, on the macOS `tch-eval` row — the first execution of a non-candle
+backend in CI — and a combined `metal-eval,tch-eval` row finally compiles
+`metal_parity`; the correctness clippy gate has no global carve-outs left (seven
+statement-scoped allows with reasons, replacing tree-wide
+`absurd_extreme_comparisons` and `never_loop` holes shaped like the three most
+delicate MCTS files); and the contract check now requires all six
+`training_log.py` subcommands while `tests/test_ladder.py::EnvContractTest` guards
+`ladder.py`'s env seam.
+
+A second nightly joined it (#47): `.github/workflows/undo_fuzz.yml` runs the
+simulate/undo probes at 06:00, on dispatch, and on pushes to `main` touching the
+engine paths they cover — `cargo test --release --test undo_integrity --
+--ignored` (all four arms) plus a rotating-seed `examples/undo_fuzz` whose start
+seed is `github.run_number * 200 + 1` and is echoed into the log. Until then the
+only systematic undo probe was `#[ignore]`d and no workflow passed `--ignored`,
+so outside a hand-launch it had never run at all.
+
 ```bash
 # Re-verify locally
 cd polyfish-rs && python3 scripts/check_cli_contract.py
@@ -1148,15 +1305,40 @@ rather than a silent restart from random weights. The experiment record is no
 longer single-machine: `training_log.csv` and `ladder.json` are tracked in git
 (`.gitignore`) and `scripts/backup_experiment_record.sh` snapshots the record
 (plus `checkpoints/`, which stays gitignored) to another disk or a remote, with a
-MANIFEST and SHA256SUMS. The Python env is pinned and consistent
+MANIFEST and SHA256SUMS — and, since #23, `run_training_loop.sh` actually runs
+it: on the checkpoint cadence (`POLYFISH_BACKUP_EVERY`) and again from the exit
+trap, non-fatally, whenever `POLYFISH_BACKUP_DIR` is set. The Python env is pinned and consistent
 (`requirements.txt`, single `POLYFISH_TORCH_VERSION` pin read by all three setup
 scripts, each installing the torch wheel its target needs — `local_setup.sh` no
 longer installs none). The dashboard now emits every column `training_log.csv`
-records, header-driven rather than a fixed struct (`src/main.rs:1839`,
-`src/bin/dashboard.rs:55`), and `training.html` drops the charts nothing produced
+records, header-driven rather than a fixed struct — one reader in
+`src/training_api.rs` that both binaries route to (#23: it had been copy-pasted
+into both, with the 40-of-63-column `MetricRow` reader still live behind
+`api_runs`; that reader is deleted), and `training.html` drops the charts nothing produced
 in favour of value-label composition, decisive-game rate and policy KL.
 
 ALSO FIXED: `train.py` has a test suite, and search is reproducible.
+
+**The durability tooling had no caller (#23).** `backup_experiment_record.sh`
+was thorough and correct and nothing in the repo ran it, so the record still
+lived on one disk and the claim rested on a human typing the command. The loop
+now snapshots on the checkpoint cadence, last in the iteration so the weights and
+the CSV/ladder rows that grade them land in one snapshot, and once from
+`cleanup`'s EXIT trap so an aborted gauge, a failed self-play, a plateau stop or
+a Ctrl-C still leaves everything since the last window. A backup failure is
+reported on stderr and never ends the run — the mirror of the fail-fatal gauge
+reading — and an unset `POLYFISH_BACKUP_DIR` is announced at startup, since
+silence is what hid the missing caller. `tests/test_backup_record.py` drives the
+script end to end and runs the loop's own `snapshot_record` under `set -e`
+against a failing backup; `scripts/smoke_train_loop.sh` exports a backup dir and
+asserts a snapshot landed, which is the only place the exit-trap branch executes.
+Two holes closed in the script itself: `.current_run` is now backed up, and a
+directory with no files no longer counts as a found item (an empty source dir
+published a 0-file snapshot, advanced LATEST onto it and called it complete).
+
+STILL OPEN in T3: only the mapper's ability-block capacity — 21 abilities in 21
+slots, zero headroom. The aliasing hazard itself is closed by the const block in
+`src/ai/mapper.rs`, so this is a capacity question, not a correctness one.
 
 **The mapper's ability-block guard was vacuous.** The audit claimed a 23rd
 `AbilityType` would fail the build. `ability_slot`'s match is exhaustive, so a
@@ -1323,26 +1505,43 @@ Steps 1–4 are all hours of work. A2b is the first item that is genuinely a
 design change rather than a repair, which is why it sits after the re-baseline —
 it needs a working instrument to be judged against.
 
-### Where the chain actually stands (Aug 18, 2026)
+### Where the chain actually stands (Aug 23, 2026)
 
-Steps 1, 2, 3, 4 and 7 are **done**. Step 5 — the re-baseline — is the next
-action and nothing downstream of it should be started first.
+Steps 1, 2, 3, 4 and 7 are **done**. Step 5 — the re-baseline — is still the next
+action, and nothing downstream of it should be started first. Two further waves
+have landed since that was first written and neither of them was step 5.
 
 Two things must be settled *before* the re-baseline reading is taken, or it will
 measure the wrong thing:
 
-- **What the baseline is a baseline OF.** This wave landed several behaviour
-  changes that are pre-registered but unmeasured (`EXP_LABEL_001`,
+- **What the baseline is a baseline OF.** The Aug 18 wave landed several
+  behaviour changes that are pre-registered but unmeasured (`EXP_LABEL_001`,
   `EXP_SEARCH_002`, `EXP_DATA_001`, `EXP_DATA_002`, `EXP_TEACH_001`,
   `EXP_TRAIN_001` in `hypothesis_driven_improvements.md`). They are all ON by
   default and cannot be separated by a single reading. `EXP_SEARCH_001`
   (adversarial in-tree search) is the exception — it is OFF by default and is the
-  one arm that can be A/B'd against the same baseline.
+  one arm that can be A/B'd against the same baseline. The Aug 23 wave adds
+  nothing to that list: `EXP_TEACH_002`, `EXP_TEACH_003` and `EXP_LABEL_003` are
+  all registered and all inert at HEAD, since no driver runs the replay import
+  path and `self_play`'s winner rule is unchanged.
+- **Take the reading with `--dump-stats-dir` retained.** The paired estimator
+  (#6) reads arena's per-game dump, and `rho` — the number that decides whether
+  the unpaired interval on every past reading was over- or under-confident, and
+  what a raised `GAUGE_GAMES` would actually buy — cannot be computed from a
+  reading whose dump was thrown away. The loop already passes the flag; keep the
+  directory.
 
 Step 6 is unchanged and its ordering warning now matters more, not less: **A2 was
 settled ahead of A2b** (one zero-sum constant landed; the label still reads raw
 `score`). If the re-baseline reads worse than the old band, check that before
 concluding anything about the search changes.
+
+One coverage note for a future auditor: the Aug 23 wave was the first pass over
+`polyfish-mod`, the replay subsystem and the `polyfish-ui` fork, all three listed
+as unaudited below. The fork is gone (#55), the replay subsystem now has a
+round-trip guard and a version gate (#43, #44), and the mod's capture path is
+converted server-side (#41) — but the C# side itself is still unverified, and
+`polyfish-scraper` is still unaudited.
 
 ---
 
@@ -1362,8 +1561,13 @@ returned more than is captured here and deserves its own pass.
 **Aug 18:** E2 got that pass — all seven claims reproduced with throwaway
 integration probes, six of them fixed (see E2). R1/R3/R4 were independently
 re-verified against the source and the live PyTorch net; R4 came back materially
-different from how it was written. The `polyfish-mod` C# side, `polyfish-scraper`
-and the replay subsystem are still unaudited.
+different from how it was written.
+
+**Aug 23:** the replay subsystem, the mod's capture path and the `polyfish-ui`
+fork got their first pass (#41, #43, #44, #55) — the fork is deleted, the
+executor has a per-command round-trip guard, and training import is
+version-gated. The `polyfish-mod` **C# side** is still unverified (no dotnet or
+BepInEx toolchain here) and `polyfish-scraper` is still unaudited.
 
 CLAUDE.md was corrected in the same session (commit `459a32b`) — its
 dual-network sync section had the wrong channel count, player-state dim, and
