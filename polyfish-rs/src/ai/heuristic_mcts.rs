@@ -177,6 +177,8 @@ impl GreedyHeuristicAgent {
             })
             .collect();
 
+        // Dead while TEMPERATURE_MOVE_THRESHOLD is 0; see its doc comment.
+        #[allow(clippy::absurd_extreme_comparisons)]
         let chosen = if move_count < crate::ai::mcts_zero::ZeroMctsAgent::TEMPERATURE_MOVE_THRESHOLD
             && moves.len() > 1
         {
@@ -352,6 +354,8 @@ impl HeuristicMctsAgent {
             })
             .collect();
 
+        // Dead while TEMPERATURE_MOVE_THRESHOLD is 0; see its doc comment.
+        #[allow(clippy::absurd_extreme_comparisons)]
         let sampled_idx = if move_count
             < crate::ai::mcts_zero::ZeroMctsAgent::TEMPERATURE_MOVE_THRESHOLD
             && root.children.len() > 1

@@ -404,6 +404,8 @@ async fn rng_step(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     // Play at least one move
     game.state._messages.clear();
+    // Loop-as-block: every arm below breaks after a single round.
+    #[allow(clippy::never_loop)]
     loop {
         let moves = game.legal_moves();
         if moves.is_empty() {

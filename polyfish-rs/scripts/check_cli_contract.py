@@ -31,7 +31,14 @@ CONTRACTS = {
     "polyfish-rs/run_training_loop.sh": {
         "self_play", "arena", "polyfish",
         "ladder.py active", "ladder.py record", "ladder.py freeze",
-        "ladder.py audit-opponents", "training_log.py append-row",
+        "ladder.py audit-opponents",
+        # Every training_log.py subcommand the loop drives, not just the one
+        # that writes the row: dropping any of them breaks the run record, and
+        # requiring only append-row let the rest go unnoticed (#48).
+        "training_log.py migrate", "training_log.py resolve-run",
+        "training_log.py finish-run", "training_log.py now-iso",
+        "training_log.py parse-self-play", "training_log.py parse-train",
+        "training_log.py append-row",
     },
     "polyfish-rs/bisect_arm.sh": {"self_play"},
     "polyfish-rs/bench_actor_ceiling.sh": {"actor_ceiling"},

@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -746,6 +747,59 @@ class PowerCommandTest(unittest.TestCase):
         self.assertEqual(d["at_games"], 64)
         self.assertGreater(d["games_per_reading"], d["at_games"])
         self.assertAlmostEqual(d["resolves_pp"], 11.23, places=2)
+
+
+class EnvContractTest(unittest.TestCase):
+    """Every env var ladder.py reads must be exported by a shell driver or be a
+    declared hand-set knob. The mirror of test_train.py's EnvContractTest for
+    the other half of the pipeline: nothing tied the names together, so renaming
+    GAUGE_FREEZE_WR would have restored the production 0.80 bar inside the smoke
+    and failed on a confusing verdict instead of a named error (#48)."""
+
+    # Hand-set for an off-default run; no driver exports them. Adding a name
+    # here is a claim that ladder.py's default is the production behaviour.
+    OPTIONAL = {
+        "LADDER_FILE",
+        "GAUGE_MIN_EFFECT",
+    }
+
+    DRIVERS = ("run_training_loop.sh", "scripts/smoke_train_loop.sh")
+
+    @staticmethod
+    def _read(path):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, path)) as f:
+            return f.read()
+
+    def _exports(self):
+        exports = set()
+        for driver in self.DRIVERS:
+            exports |= set(re.findall(r'^\s*export ([A-Z0-9_]+)=', self._read(driver), re.M))
+        return exports
+
+    def _reads(self):
+        return set(
+            re.findall(r'os\.environ(?:\.get\(|\[)\s*"([A-Z0-9_]+)"', self._read("ladder.py"))
+        )
+
+    def test_every_env_read_is_exported_or_declared_optional(self):
+        reads = self._reads()
+        self.assertTrue(reads, "no os.environ reads found in ladder.py — regex rotted?")
+        unaccounted = reads - self._exports() - self.OPTIONAL
+        self.assertEqual(
+            unaccounted, set(),
+            f"ladder.py reads {sorted(unaccounted)} but no shell driver exports them and they "
+            "are not on the hand-set allowlist. Export from a driver or add to "
+            "EnvContractTest.OPTIONAL.",
+        )
+
+    def test_the_smoke_still_exports_the_freeze_bar(self):
+        """GAUGE_FREEZE_WR is the only thing that reaches the anchor-freeze
+        branch, which runs nowhere but the loop and the smoke."""
+        self.assertIn("GAUGE_FREEZE_WR", self._reads())
+        smoke = set(re.findall(r'^\s*export ([A-Z0-9_]+)=',
+                               self._read("scripts/smoke_train_loop.sh"), re.M))
+        self.assertIn("GAUGE_FREEZE_WR", smoke)
 
 
 if __name__ == "__main__":

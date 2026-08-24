@@ -339,9 +339,13 @@ impl<'a> ZeroMctsAgent<'a> {
                 .collect();
             let sum: f32 = noise.iter().sum();
             if sum > 0.0 {
-                for n in &mut noise { *n /= sum; }
+                for n in &mut noise {
+                    *n /= sum;
+                }
             } else {
-                for n in &mut noise { *n = 1.0 / root.children.len() as f32; }
+                for n in &mut noise {
+                    *n = 1.0 / root.children.len() as f32;
+                }
             }
 
             for (child, n) in root.children.iter_mut().zip(noise.iter()) {
@@ -384,7 +388,8 @@ impl<'a> ZeroMctsAgent<'a> {
             }
         }
 
-        // in early game, sample proportional to visit counts instead of argmax
+        // Early-game visit sampling instead of argmax; dead while the threshold is 0.
+        #[allow(clippy::absurd_extreme_comparisons)]
         if move_count < Self::TEMPERATURE_MOVE_THRESHOLD && root.children.len() > 1 {
             use rand::distr::{Distribution, weighted::WeightedIndex};
             let weights: Vec<f32> = root.children.iter().map(|c| c.visits.max(0.0)).collect();
@@ -500,7 +505,9 @@ impl<'a> ZeroMctsAgent<'a> {
         let current = root;
         current.add_virtual_loss(self.virtual_loss);
 
-        // First iteration (root → first child) with direct reference
+        // First iteration (root → first child) with direct reference.
+        // Loop-as-block: every arm breaks, ending the borrow of `current` before index traversal.
+        #[allow(clippy::never_loop)]
         let leaf_result = loop {
             // Terminal check - separate from horizon
             if game.state.settings._game_over {
