@@ -492,3 +492,29 @@ fn verifier_is_inert_without_diagnostics_and_catches_a_diverged_star_count() {
     );
     assert!(error.to_string().contains("source recorded"));
 }
+
+#[test]
+fn only_indistinguishable_matches_collapse() {
+    use super::executor::all_indistinguishable;
+    use crate::moves::{HarvestMove, SummonMove, UpgradeMove};
+    use crate::types::UnitType;
+
+    // Movegen walks a tile once per city whose territory contains it, so the
+    // same move can appear twice; that is not an ambiguous command.
+    let moves: Vec<Box<dyn Move>> = vec![
+        Box::new(HarvestMove::new(25)),
+        Box::new(HarvestMove::new(25)),
+        Box::new(HarvestMove::new(26)),
+    ];
+    assert!(all_indistinguishable(&moves, &[0, 1]));
+    assert!(!all_indistinguishable(&moves, &[0, 2]));
+
+    // Summon and Upgrade share MoveType::Summon and serialize identically, so
+    // the collapse must not treat them as the same move.
+    let shared: Vec<Box<dyn Move>> = vec![
+        Box::new(SummonMove::new(4, UnitType::Warrior)),
+        Box::new(UpgradeMove::new(4, UnitType::Warrior)),
+    ];
+    assert_eq!(shared[0].serialize(), shared[1].serialize());
+    assert!(!all_indistinguishable(&shared, &[0, 1]));
+}

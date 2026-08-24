@@ -15,15 +15,13 @@ use polyfish::ai::network::PolyZeroNet;
 use polyfish::ai::reward;
 use polyfish::game::{Game, STARTING_OWNER_ID};
 use polyfish::replay::{
-    REPLAY_SCHEMA_VERSION, Replay, ReplayCommand, ReplayMetadata, ReplayPlayerMetadata,
-    ReplayResult, ReplaySource, ReplayTurn,
+    CANONICAL_REPLAY_SUFFIX, REPLAY_DIR, REPLAY_SCHEMA_VERSION, Replay, ReplayCommand,
+    ReplayMetadata, ReplayPlayerMetadata, ReplayResult, ReplaySource, ReplayTurn, save_replay,
 };
 use polyfish::states::{GameState, PlayerId};
 use polyfish::types::MapSize;
 use serde_json::json;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -2507,20 +2505,25 @@ fn main() -> anyhow::Result<()> {
         candle_core::safetensors::save(&tensors, &games_tmp)?;
         std::fs::rename(&games_tmp, &games_file)?;
 
-        // Save BEST game as replay
+        // Save BEST game as replay. Through save_replay, so every iteration
+        // asserts the recap the writers produce is a loadable replay; the raw
+        // serde path wrote whatever it had and swallowed both errors. Warn but
+        // never abort: games_*.safetensors is already on disk.
         if let Some(recap) = best_recap {
-            let replay_filename = format!(
-                "replays/high_scores/best_game_score_{}_{}.replay.json",
-                max_score, timestamp
-            );
-            if let Ok(json) = serde_json::to_string_pretty(&recap) {
-                if let Ok(mut file) = File::create(&replay_filename) {
-                    let _ = file.write_all(json.as_bytes());
-                    println!(
-                        "🏆 Highest score game ({}) saved to {}",
-                        max_score, replay_filename
-                    );
-                }
+            let dir = std::path::Path::new(REPLAY_DIR).join("high_scores");
+            let replay_path = dir.join(format!(
+                "best_game_score_{max_score}_{timestamp}{CANONICAL_REPLAY_SUFFIX}"
+            ));
+            match std::fs::create_dir_all(&dir)
+                .map_err(|e| e.to_string())
+                .and_then(|()| save_replay(&recap, &replay_path).map_err(|e| e.to_string()))
+            {
+                Ok(()) => println!(
+                    "🏆 Highest score game ({}) saved to {}",
+                    max_score,
+                    replay_path.display()
+                ),
+                Err(e) => eprintln!("⚠️  best recap (score {}) was not saved: {}", max_score, e),
             }
         }
     }
