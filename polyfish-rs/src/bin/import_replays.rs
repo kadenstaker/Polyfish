@@ -1,7 +1,13 @@
 use clap::{Parser, Subcommand};
 use polyfish::replay::training::{TrainingCollector, TrainingSample, write_training_files};
-use polyfish::replay::{ReplayExecutor, load_replay, validate_training_eligibility};
+use polyfish::replay::{
+    CANONICAL_REPLAY_SUFFIX, DivergenceVerifier, MAX_SUPPORTED_GAME_VERSION,
+    MIN_SUPPORTED_GAME_VERSION, PairObserver, ReplayError, ReplayExecutor, VersionSupport,
+    convert_mod_payload, converted_payload_stem, is_canonical_replay_file, is_legacy_mod_payload,
+    load_replay, save_replay, validate_training_eligibility_with,
+};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -24,6 +30,15 @@ enum Command {
         #[arg(long, default_value_t = 50_000)]
         samples_per_file: usize,
     },
+    /// Convert pre-canonical mod capture payloads into canonical replays.
+    ConvertLegacy {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        recursive: bool,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -36,6 +51,9 @@ struct Common {
     fail_fast: bool,
     #[arg(long)]
     error_report: Option<PathBuf>,
+    /// Import a capture whose game version is outside the supported range anyway.
+    #[arg(long)]
+    allow_version_drift: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +61,7 @@ struct Common {
 struct FileFailure {
     file: String,
     stage: &'static str,
+    version: Option<i32>,
     error: String,
 }
 
@@ -53,8 +72,12 @@ struct Summary {
     valid_files: usize,
     invalid_files: usize,
     training_eligible_files: usize,
+    derived_result_files: usize,
     training_samples: usize,
+    version_drift_files: usize,
+    source_score_drifts: usize,
     output_files: Vec<String>,
+    failures_by_version: BTreeMap<String, usize>,
     failures: Vec<FileFailure>,
 }
 
@@ -76,21 +99,46 @@ fn replay_files(input: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
-        .filter(|path| path.to_string_lossy().ends_with(".replay.json"))
+        .filter(|path| is_canonical_replay_file(path))
         .collect();
     files.sort();
     Ok(files)
 }
 
-fn record_failure(summary: &mut Summary, path: &Path, stage: &'static str, error: impl ToString) {
+fn record_failure(
+    summary: &mut Summary,
+    path: &Path,
+    stage: &'static str,
+    error: impl ToString,
+    version: Option<i32>,
+) {
     let failure = FileFailure {
         file: path.display().to_string(),
         stage,
+        version,
         error: error.to_string(),
     };
     eprintln!("INVALID [{}] {}: {}", stage, failure.file, failure.error);
     summary.invalid_files += 1;
+    *summary
+        .failures_by_version
+        .entry(version.map_or_else(|| "unknown".to_string(), |version| version.to_string()))
+        .or_default() += 1;
     summary.failures.push(failure);
+}
+
+fn execution_stage(error: &ReplayError) -> &'static str {
+    match error {
+        ReplayError::SourceDivergence { .. } => "sourceDivergence",
+        _ => "execute",
+    }
+}
+
+fn report_score_notes(summary: &mut Summary, path: &Path, verifier: &DivergenceVerifier) {
+    for note in verifier.score_notes() {
+        summary.source_score_drifts += 1;
+        eprintln!("SOURCE-SCORE-DRIFT {}: {note}", path.display());
+    }
 }
 
 fn write_report(path: Option<&Path>, summary: &Summary) -> anyhow::Result<()> {
@@ -105,8 +153,100 @@ fn write_report(path: Option<&Path>, summary: &Summary) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rewrites every source payload under `input` as a canonical replay. The
+/// converter re-executes each capture, so a file that lands here replays.
+fn convert_legacy(input: &Path, output: &Path, recursive: bool) -> anyhow::Result<()> {
+    let files = legacy_payload_files(input, recursive)?;
+    fs::create_dir_all(output)?;
+    let mut converted = 0usize;
+    let mut failed = 0usize;
+    for path in &files {
+        let payload: serde_json::Value = match fs::read(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| Ok(serde_json::from_slice(&bytes)?))
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                eprintln!("INVALID [read] {}: {error}", path.display());
+                failed += 1;
+                continue;
+            }
+        };
+        if !is_legacy_mod_payload(&payload) {
+            eprintln!(
+                "SKIP {}: not a pre-canonical mod capture payload",
+                path.display()
+            );
+            continue;
+        }
+        match convert_mod_payload(&payload) {
+            Ok(replay) => {
+                let target = output.join(format!(
+                    "{}{CANONICAL_REPLAY_SUFFIX}",
+                    converted_payload_stem(input, path)
+                ));
+                if let Err(error) = save_replay(&replay, &target) {
+                    eprintln!("INVALID [write] {}: {error}", target.display());
+                    failed += 1;
+                    continue;
+                }
+                converted += 1;
+                println!(
+                    "CONVERTED {} -> {} ({} commands)",
+                    path.display(),
+                    target.display(),
+                    replay.command_count()
+                );
+            }
+            Err(error) => {
+                eprintln!("INVALID [convert] {}: {error}", path.display());
+                failed += 1;
+            }
+        }
+    }
+    println!("converted {converted} of {} payloads", files.len());
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} payloads failed to convert", files.len())
+    }
+    Ok(())
+}
+
+fn legacy_payload_files(input: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
+    if input.is_file() {
+        return Ok(vec![input.to_path_buf()]);
+    }
+    if !input.is_dir() {
+        anyhow::bail!(
+            "input {} is neither a file nor a directory",
+            input.display()
+        );
+    }
+    let max_depth = if recursive { usize::MAX } else { 1 };
+    let mut files: Vec<_> = WalkDir::new(input)
+        .min_depth(1)
+        .max_depth(max_depth)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "json") && !is_canonical_replay_file(path)
+        })
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Command::ConvertLegacy {
+        input,
+        output,
+        recursive,
+    } = &args.command
+    {
+        return convert_legacy(input, output, *recursive);
+    }
     let (common, export) = match &args.command {
         Command::Validate(common) => (common, None),
         Command::ExportTraining {
@@ -114,6 +254,7 @@ fn main() -> anyhow::Result<()> {
             output,
             samples_per_file,
         } => (common, Some((output.as_path(), *samples_per_file))),
+        Command::ConvertLegacy { .. } => unreachable!("handled above"),
     };
     let files = replay_files(&common.input, common.recursive)?;
     let mut summary = Summary {
@@ -126,7 +267,18 @@ fn main() -> anyhow::Result<()> {
         let replay = match load_replay(path) {
             Ok(replay) => replay,
             Err(error) => {
-                record_failure(&mut summary, path, "load", error);
+                record_failure(&mut summary, path, "load", error, None);
+                if common.fail_fast {
+                    break;
+                }
+                continue;
+            }
+        };
+        let version = Some(replay.initial_state.settings.version);
+        let checkpoints = match replay.metadata.end_turn_checkpoints() {
+            Ok(checkpoints) => checkpoints,
+            Err(error) => {
+                record_failure(&mut summary, path, "sourceDiagnostics", error, version);
                 if common.fail_fast {
                     break;
                 }
@@ -135,44 +287,72 @@ fn main() -> anyhow::Result<()> {
         };
 
         if export.is_some() {
-            if let Err(error) = validate_training_eligibility(&replay) {
-                record_failure(&mut summary, path, "trainingEligibility", error);
-                if common.fail_fast {
-                    break;
-                }
-                continue;
-            }
-            let mut collector = TrainingCollector::new(&replay)?;
-            match ReplayExecutor::execute_with_observer(&replay, &mut collector) {
-                Ok(game) => match collector.finish(&game, replay.result.as_ref(), path) {
-                    Ok(mut samples) => {
-                        summary.valid_files += 1;
-                        summary.training_eligible_files += 1;
-                        summary.training_samples += samples.len();
-                        all_samples.append(&mut samples);
-                        println!(
-                            "VALID {} ({} samples)",
-                            path.display(),
-                            replay.command_count()
-                        );
-                    }
+            let eligibility =
+                match validate_training_eligibility_with(&replay, common.allow_version_drift) {
+                    Ok(eligibility) => eligibility,
                     Err(error) => {
-                        record_failure(&mut summary, path, "trainingLabels", error);
+                        record_failure(&mut summary, path, "trainingEligibility", error, version);
                         if common.fail_fast {
                             break;
                         }
+                        continue;
                     }
-                },
+                };
+            if eligibility.version_support != VersionSupport::Supported {
+                summary.version_drift_files += 1;
+                eprintln!(
+                    "WARN [versionDrift] {}: game version {} is outside the supported range {}..={}",
+                    path.display(),
+                    eligibility.game_version,
+                    MIN_SUPPORTED_GAME_VERSION,
+                    MAX_SUPPORTED_GAME_VERSION
+                );
+            }
+            let mut observers = PairObserver(
+                TrainingCollector::new_with(&replay, common.allow_version_drift)?,
+                DivergenceVerifier::new(checkpoints),
+            );
+            let had_result = replay.result.is_some();
+            match ReplayExecutor::execute_with_observer(&replay, &mut observers) {
+                Ok(game) => {
+                    let PairObserver(collector, verifier) = observers;
+                    report_score_notes(&mut summary, path, &verifier);
+                    match collector.finish(&game, replay.result.as_ref(), path) {
+                        Ok(mut samples) => {
+                            summary.valid_files += 1;
+                            summary.training_eligible_files += 1;
+                            summary.training_samples += samples.len();
+                            if !had_result {
+                                summary.derived_result_files += 1;
+                                println!("DERIVED-RESULT {}", path.display());
+                            }
+                            all_samples.append(&mut samples);
+                            println!(
+                                "VALID {} ({} samples)",
+                                path.display(),
+                                replay.command_count()
+                            );
+                        }
+                        Err(error) => {
+                            record_failure(&mut summary, path, "trainingLabels", error, version);
+                            if common.fail_fast {
+                                break;
+                            }
+                        }
+                    }
+                }
                 Err(error) => {
-                    record_failure(&mut summary, path, "execute", error);
+                    record_failure(&mut summary, path, execution_stage(&error), error, version);
                     if common.fail_fast {
                         break;
                     }
                 }
             }
         } else {
-            match ReplayExecutor::execute(&replay) {
+            let mut verifier = DivergenceVerifier::new(checkpoints);
+            match ReplayExecutor::execute_with_observer(&replay, &mut verifier) {
                 Ok(_) => {
+                    report_score_notes(&mut summary, path, &verifier);
                     summary.valid_files += 1;
                     println!(
                         "VALID {} ({} commands)",
@@ -181,7 +361,7 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
                 Err(error) => {
-                    record_failure(&mut summary, path, "execute", error);
+                    record_failure(&mut summary, path, execution_stage(&error), error, version);
                     if common.fail_fast {
                         break;
                     }

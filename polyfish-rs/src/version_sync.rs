@@ -1,7 +1,11 @@
 use crate::states::GameState;
 
-// enum
+/// Polytopia ruleset revisions the engine gates behaviour on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(i32)]
 pub enum GameVersion {
+    /// Pre-versioning data (scraper dumps, hand-written JSON).
+    Legacy = 0,
     AquarionRework = 105,
     TheForgotten = 108,
     BalancePass2025 = 114,
@@ -45,6 +49,26 @@ pub enum GameVersion {
     – ‘Pacifist’ task is replaced by ‘Converter’ (convert 3 enemies to build ‘Church of Converts’ monument)
      */
     CymantiRework = 115,
+}
+
+/// The ruleset every generated map and every training game runs.
+/// `GameSettings` defaults to it, so a state that is never loaded from
+/// JSON or generated still plays the rules training plays.
+pub const CURRENT_VERSION: i32 = GameVersion::CymantiRework as i32;
+
+/// serde default for `GameSettings::version`.
+pub fn default_version() -> i32 {
+    CURRENT_VERSION
+}
+
+/// True when `version` plays at or after `at`'s ruleset.
+pub fn is_at_least(version: i32, at: GameVersion) -> bool {
+    version >= at as i32
+}
+
+/// True when `version` predates `at`'s ruleset.
+pub fn is_before(version: i32, at: GameVersion) -> bool {
+    !is_at_least(version, at)
 }
 
 pub fn get_burn_forest_cost(gs: &GameState) -> i32 {

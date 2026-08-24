@@ -6,6 +6,7 @@ use crate::functions::{get_adjacent_indices, get_capital_city};
 use crate::settings::has_skill;
 use crate::states::{GameState, PlayerId, UnitState};
 use crate::types::{SkillType, StructureType, TerrainType};
+use crate::version_sync::{GameVersion, is_at_least};
 
 /// Discover tiles around a unit or specific tiles
 pub fn discover_tiles(
@@ -102,7 +103,7 @@ pub fn discover_tiles(
                 tile.explorers.insert(pov_id);
 
                 // Check if lighthouse
-                if state.settings.version >= 114 {
+                if is_at_least(state.settings.version, GameVersion::BalancePass2025) {
                     if let Some(Some(struct_state)) = state.structures.get(&idx) {
                         if struct_state.structure_type == StructureType::Lighthouse {
                             let city_to_reward =
@@ -271,7 +272,7 @@ fn score_fog_tile(state: &GameState, visible: &HashSet<i32>, idx: i32) -> i32 {
     for r_idx in check_reveal {
         if !visible.contains(&r_idx) {
             reveal_count += 1;
-            if state.settings.version >= 114 {
+            if is_at_least(state.settings.version, GameVersion::BalancePass2025) {
                 if let Some(Some(s)) = state.structures.get(&r_idx) {
                     if s.structure_type == StructureType::Lighthouse {
                         has_lighthouse = true;

@@ -15,10 +15,16 @@ use polyfish::moves::{
         freeze_area::FreezeAreaMove, heal_others::HealOthersMove, promote::PromoteMove,
     },
 };
-use polyfish::replay::{Replay, ReplayExecutor, ReplayPlayback, load_replay};
+use polyfish::replay::{
+    REJECTED_REPLAY_DIR, REPLAY_DIR, Replay, ReplayExecutor, ReplayPlayback,
+    canonical_replay_file_name, convert_mod_payload, is_canonical_replay_file,
+    is_legacy_mod_payload, load_replay, local_replay_path, rejected_payload_path,
+    rejected_reason_path,
+};
 use polyfish::types::{
     AbilityType, CityRewardType, MapSize, StructureType, TechnologyType, TribeType, UnitType,
 };
+use polyfish::web_static;
 use polyfish::{MapType, game::Game};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -70,10 +76,10 @@ async fn main() {
 
     // 2. Try to load the latest canonical replay from replays/.
     if !loaded {
-        if let Ok(entries) = std::fs::read_dir("replays") {
+        if let Ok(entries) = std::fs::read_dir(REPLAY_DIR) {
             let mut canonical_replays: Vec<_> = entries
                 .flatten()
-                .filter(|e| e.file_name().to_string_lossy().ends_with(".replay.json"))
+                .filter(|e| is_canonical_replay_file(&e.path()))
                 .collect();
 
             canonical_replays.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
@@ -123,8 +129,7 @@ async fn main() {
             )
             .expect("Failed to load model weights")
         };
-        polyfish::ai::network::PolyZeroNet::new(vb)
-            .expect("Failed to build neural network")
+        polyfish::ai::network::PolyZeroNet::new(vb).expect("Failed to build neural network")
     } else {
         panic!(
             "Model file {} not found! Please run init_model.py first.",
@@ -171,7 +176,10 @@ async fn main() {
         .route("/trainer/hint", post(get_trainer_hint))
         .route("/system/cpu", get(get_cpu_usage))
         .route("/api/runs", get(polyfish::training_api::api_runs))
-        .route("/api/training-metrics", get(api_training_metrics))
+        .route(
+            "/api/training-metrics",
+            get(polyfish::training_api::api_training_metrics),
+        )
         .route(
             "/api/moves-by-turn",
             get(polyfish::training_api::api_moves_by_turn),
@@ -184,15 +192,21 @@ async fn main() {
             "/api/elo-ladder",
             get(polyfish::training_api::api_elo_ladder),
         )
-        .nest_service("/assets", ServeDir::new("../polyfish-ui/dist/assets"))
-        .nest_service("/simulator", ServeDir::new("../polyfish-ui/dist/simulator"))
-        .nest_service("/static", ServeDir::new("../polyfish-ui/dist"))
+        .nest_service(
+            "/assets",
+            ServeDir::new(format!("{}/assets", web_static::SPA_DIST)),
+        )
+        // Same bytes as the fallback below, not a second copy: `polyfish-ui`
+        // iframes /simulator/index.html and /simulator/training.html, so the
+        // prefix has to keep resolving (a matched nest never reaches a fallback).
+        .nest_service("/simulator", ServeDir::new(web_static::STATIC_UI))
+        .nest_service("/static", ServeDir::new(web_static::SPA_DIST))
         // Built SPA first, then the static UI in src/public (training.html, js/,
         // css/) that ships unbuilt; unmatched paths fall back to SPA routing.
         // `fallback` keeps the second dir's own status — `not_found_service`
         // would stamp 404 onto files it serves successfully.
-        .fallback_service(ServeDir::new("../polyfish-ui/dist").fallback(
-            ServeDir::new("../src/public").not_found_service(spa_fallback.into_service()),
+        .fallback_service(ServeDir::new(web_static::SPA_DIST).fallback(
+            ServeDir::new(web_static::STATIC_UI).not_found_service(spa_fallback.into_service()),
         ))
         .layer(CorsLayer::permissive())
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 50))
@@ -399,6 +413,8 @@ async fn rng_step(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     // Play at least one move
     game.state._messages.clear();
+    // Loop-as-block: every arm below breaks after a single round.
+    #[allow(clippy::never_loop)]
     loop {
         let moves = game.legal_moves();
         if moves.is_empty() {
@@ -643,7 +659,12 @@ async fn reset_game(
     } else {
         match serde_json::from_slice(&body_bytes) {
             Ok(p) => Some(p),
-            Err(e) => return Err((axum::http::StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e))),
+            Err(e) => {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Invalid JSON: {}", e),
+                ));
+            }
         }
     };
 
@@ -1148,38 +1169,13 @@ async fn check_replay_exists(Json(params): Json<CheckReplayParams>) -> Json<Valu
     }
 }
 
-fn sanitize_storage_key(name: &str) -> String {
-    let mut result = String::new();
-    let mut last_was_dash = false;
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            result.push(c.to_ascii_lowercase());
-            last_was_dash = false;
-        } else {
-            if !last_was_dash && !result.is_empty() {
-                result.push('-');
-                last_was_dash = true;
-            }
-        }
-    }
-    result.trim_matches('-').to_string()
-}
-
-async fn save_replay_endpoint(
-    State(_state): State<Arc<AppState>>,
-    body: Json<Value>,
-) -> Json<Value> {
-    let replay: Replay = match serde_json::from_value(body.0.clone()) {
+async fn save_replay_endpoint(State(_state): State<Arc<AppState>>, body: String) -> Json<Value> {
+    let replay = match accept_replay_payload(&body) {
         Ok(replay) => replay,
-        Err(error) => {
-            return replay_error_json(format!("Replay must use canonical schema v1: {error}"));
-        }
+        Err(reason) => return rejected_replay_json(&body, reason),
     };
-    if let Err(error) = ReplayExecutor::execute(&replay) {
-        return replay_error_json(error);
-    }
     // Create replays directory if not exists
-    let _ = std::fs::create_dir_all("replays");
+    let _ = std::fs::create_dir_all(REPLAY_DIR);
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1229,31 +1225,54 @@ async fn save_replay_endpoint(
                 .header("apikey", &supabase_key)
                 .header("Authorization", format!("Bearer {}", supabase_key));
 
-            if let Ok(res) = req.send().await {
-                if let Ok(json) = res.json::<serde_json::Value>().await {
-                    if let Some(arr) = json.as_array() {
-                        if !arr.is_empty() {
-                            println!(
-                                "⚠️ Rejected duplicate game (UUID or Seed/Name): {}",
-                                game_name
-                            );
-                            return Json(serde_json::json!({
-                                "status": "error",
-                                "message": "Duplicate game found"
-                            }));
+            // Fail closed: only a 2xx array body clears a replay for upload, so an
+            // unreachable or erroring Supabase refuses visibly instead of duplicating.
+            let already_present = match req.send().await {
+                Ok(res) => {
+                    let status = res.status();
+                    if !status.is_success() {
+                        let body = res.text().await.unwrap_or_default();
+                        return replay_error_json(format!(
+                            "Duplicate check failed ({status}), refusing to upload: {body}"
+                        ));
+                    }
+                    match res.json::<serde_json::Value>().await {
+                        Ok(json) => match json.as_array() {
+                            Some(rows) => !rows.is_empty(),
+                            None => {
+                                return replay_error_json(
+                                    "Duplicate check returned a non-array body, refusing to upload",
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            return replay_error_json(format!(
+                                "Duplicate check body unreadable ({e}), refusing to upload"
+                            ));
                         }
                     }
                 }
+                Err(e) => {
+                    return replay_error_json(format!(
+                        "Duplicate check network error ({e}), refusing to upload"
+                    ));
+                }
+            };
+            if already_present {
+                println!(
+                    "⚠️ Rejected duplicate game (UUID or Seed/Name): {}",
+                    game_name
+                );
+                return Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Duplicate game found"
+                }));
             }
 
             // Record does not exist, upload to Supabase Storage directly!
             let bucket_name =
                 std::env::var("SUPABASE_STORAGE_BUCKET").unwrap_or_else(|_| "games".to_string());
-            let file_name = format!(
-                "{}_{}.replay.json",
-                sanitize_storage_key(game_name),
-                timestamp
-            );
+            let file_name = canonical_replay_file_name(game_name, timestamp);
             let storage_url = format!(
                 "{}/storage/v1/object/{}/{}",
                 supabase_url.trim_end_matches('/'),
@@ -1343,11 +1362,9 @@ async fn save_replay_endpoint(
             game_name
         );
         (
-            format!(
-                "replays/{}_{}.json",
-                sanitize_storage_key(game_name),
-                timestamp
-            ),
+            local_replay_path(game_name, timestamp)
+                .to_string_lossy()
+                .into_owned(),
             serde_json::to_string_pretty(&replay).unwrap(),
         )
     };
@@ -1368,17 +1385,12 @@ async fn save_replay_endpoint(
 // instead of saving to the db, save to /replays
 async fn save_replay_local_endpoint(
     State(_state): State<Arc<AppState>>,
-    body: Json<Value>,
+    body: String,
 ) -> Json<Value> {
-    let replay: Replay = match serde_json::from_value(body.0.clone()) {
+    let replay = match accept_replay_payload(&body) {
         Ok(replay) => replay,
-        Err(error) => {
-            return replay_error_json(format!("Replay must use canonical schema v1: {error}"));
-        }
+        Err(reason) => return rejected_replay_json(&body, reason),
     };
-    if let Err(error) = ReplayExecutor::execute(&replay) {
-        return replay_error_json(error);
-    }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1391,11 +1403,10 @@ async fn save_replay_local_endpoint(
         .filter(|name| !name.is_empty())
         .unwrap_or(&replay.initial_state.settings.game_name);
 
-    let filename = format!(
-        "replays/{}_{}.replay.json",
-                sanitize_storage_key(game_name),
-                timestamp
-    );
+    let _ = std::fs::create_dir_all(REPLAY_DIR);
+    let filename = local_replay_path(game_name, timestamp)
+        .to_string_lossy()
+        .into_owned();
     let content = serde_json::to_string_pretty(&replay).unwrap();
 
     println!("✅ Successfully saved {} to Local Storage", game_name);
@@ -1488,13 +1499,70 @@ fn install_replay(state: &Arc<AppState>, replay: Replay, filename: String) -> Js
     Json(response)
 }
 
+/// Accepts a canonical replay, or converts the mod's pre-canonical capture
+/// payload into one. Only a body that also re-executes is accepted, so what
+/// reaches disk is always replayable.
+fn accept_replay_payload(body: &str) -> Result<Replay, String> {
+    let payload: Value =
+        serde_json::from_str(body).map_err(|error| format!("Replay body is not JSON: {error}"))?;
+    let replay = match serde_json::from_value::<Replay>(payload.clone()) {
+        Ok(replay) => replay,
+        Err(error) => {
+            if !is_legacy_mod_payload(&payload) {
+                return Err(format!("Replay must use canonical schema v1: {error}"));
+            }
+            convert_mod_payload(&payload)
+                .map_err(|error| format!("Mod capture payload could not be converted: {error}"))?
+        }
+    };
+    ReplayExecutor::execute(&replay).map_err(|error| error.to_string())?;
+    Ok(replay)
+}
+
+/// Parks a refused body next to the reason it was refused. A capture session
+/// the server cannot accept is still recoverable from disk.
+fn quarantine_payload(body: &str, reason: &str) -> Option<String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let name = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|payload| {
+            ["/uuid", "/gameState/settings/gameName", "/metadata/gameId"]
+                .iter()
+                .find_map(|pointer| payload.pointer(pointer).and_then(Value::as_str))
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    std::fs::create_dir_all(REJECTED_REPLAY_DIR).ok()?;
+    let path = rejected_payload_path(&name, timestamp);
+    std::fs::write(&path, body).ok()?;
+    let _ = std::fs::write(rejected_reason_path(&path), reason);
+    Some(path.to_string_lossy().into_owned())
+}
+
+fn rejected_replay_json(body: &str, reason: String) -> Json<Value> {
+    match quarantine_payload(body, &reason) {
+        Some(path) => {
+            println!("\u{274c} Rejected replay payload quarantined at {path}: {reason}");
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("{reason} (payload quarantined at {path})"),
+                "quarantined": path
+            }))
+        }
+        None => replay_error_json(format!("{reason} (payload could not be quarantined)")),
+    }
+}
+
 fn replay_error_json(error: impl std::fmt::Display) -> Json<Value> {
     Json(serde_json::json!({ "status": "error", "message": error.to_string() }))
 }
 
 fn replay_playback_json(playback: &ReplayPlayback, filename: Option<&str>) -> Value {
     let game = playback.game();
-                let mut tiles: Vec<_> = game.state.tiles.values().collect();
+    let mut tiles: Vec<_> = game.state.tiles.values().collect();
     tiles.sort_by_key(|tile| tile.coords.idx);
     serde_json::json!({
                     "status": "success",
@@ -1684,7 +1752,6 @@ async fn load_initial_endpoint(
     }
 }
 
-
 async fn list_initial_endpoint() -> Json<Value> {
     let path = "../src/scraper/data/training-data/";
     let mut files = Vec::new();
@@ -1706,31 +1773,6 @@ async fn list_initial_endpoint() -> Json<Value> {
         "status": "success",
         "files": files
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sanitize_storage_key() {
-        assert_eq!(
-            sanitize_storage_key("The Winter of Love"),
-            "the-winter-of-love"
-        );
-        assert_eq!(
-            sanitize_storage_key("game-4-(yădakk-qualifiers-"),
-            "game-4-y-dakk-qualifiers"
-        );
-        assert_eq!(sanitize_storage_key("Hello World!!!"), "hello-world");
-        assert_eq!(
-            sanitize_storage_key("---Multiple---Dashes---"),
-            "multiple-dashes"
-        );
-        assert_eq!(sanitize_storage_key("UPPER_case_123"), "upper_case_123");
-        assert_eq!(sanitize_storage_key(""), "");
-        assert_eq!(sanitize_storage_key("!@#$%^&*()"), "");
-    }
 }
 
 async fn get_cpu_usage() -> Json<Value> {
@@ -1778,69 +1820,9 @@ async fn get_cpu_usage() -> Json<Value> {
     Json(serde_json::json!({ "cores": usages }))
 }
 
-/// Columns kept as strings even when they parse as numbers: `run_id` is a unix
-/// timestamp the dashboard compares and formats as text.
-const CSV_TEXT_COLUMNS: &[&str] = &[
-    "run_id",
-    "iter_started_at",
-    "run_started_at",
-    "games_file",
-    "match_type",
-];
-
-/// Every column of `training_log.csv` verbatim — numbers where the cell parses,
-/// null for blanks. Reading the header instead of a fixed struct means a column
-/// added to the CSV reaches the dashboard without a change here.
-fn training_csv_rows() -> Vec<Value> {
-    let content = std::fs::read_to_string("training_log.csv").unwrap_or_default();
-    let mut lines = content.lines().filter(|l| !l.trim().is_empty());
-    let Some(header) = lines.next() else {
-        return Vec::new();
-    };
-    let headers: Vec<&str> = header.split(',').collect();
-    lines
-        .filter(|line| line.split(',').count() >= 5)
-        .map(|line| {
-            let cells: Vec<&str> = line.split(',').collect();
-            let row: serde_json::Map<String, Value> = headers
-                .iter()
-                .enumerate()
-                .map(|(i, name)| {
-                    let cell = cells.get(i).copied().unwrap_or("").trim();
-                    let value = if CSV_TEXT_COLUMNS.contains(name) {
-                        Value::from(cell)
-                    } else if cell.is_empty() {
-                        Value::Null
-                    } else {
-                        cell.parse::<f64>()
-                            .map(Value::from)
-                            .unwrap_or_else(|_| Value::from(cell))
-                    };
-                    ((*name).to_string(), value)
-                })
-                .collect();
-            Value::Object(row)
-        })
-        .collect()
-}
-
-async fn api_training_metrics(
-    axum::extract::Query(q): axum::extract::Query<polyfish::training_api::RunFilter>,
-) -> Json<Value> {
-    let rows: Vec<Value> = training_csv_rows()
-        .into_iter()
-        .filter(|r| {
-            q.run
-                .as_ref()
-                .is_none_or(|id| r.get("run_id").and_then(Value::as_str) == Some(id.as_str()))
-        })
-        .collect();
-    Json(Value::Array(rows))
-}
-
 async fn spa_fallback() -> impl axum::response::IntoResponse {
     use axum::response::IntoResponse;
-    let index_path = std::path::Path::new("../polyfish-ui/dist/index.html");
+    let index_path = std::path::Path::new(web_static::SPA_DIST).join("index.html");
     match std::fs::read_to_string(index_path) {
         Ok(html) => axum::response::Html(html).into_response(),
         Err(_) => (axum::http::StatusCode::NOT_FOUND, "index.html not found").into_response(),

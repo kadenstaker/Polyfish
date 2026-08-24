@@ -1,0 +1,102 @@
+# Nightly cadence for the simulate/undo round-trip probes. Undo drift does not
+# panic, it lies: one move whose undo misses a field silently corrupts every
+# MCTS statistic above the broken edge, so these have to run on a schedule
+# rather than on demand.
+#
+# A separate workflow rather than a job in smoke.yml for two reasons: that
+# workflow's `on.push.paths` filter is workflow-wide, so folding this in would
+# either fire the 90-minute training smoke on every `src/actions/**` change or
+# leave the fuzz untriggered by its own sources; and the smoke's release build
+# is not reusable (scripts/smoke_train_loop.sh redirects it to target/smoke-cargo
+# at opt-level 1).
+name: Undo integrity
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_seed:
+        description: "First fuzz seed (default: derived from the run number)"
+        required: false
+      num_seeds:
+        description: "How many fuzz seeds to walk"
+        required: false
+        default: "40"
+  schedule:
+    # An hour after the training smoke so the two do not contend for runners.
+    - cron: "0 6 * * *"
+  push:
+    branches: ["main"]
+    paths:
+      - "polyfish-rs/src/game.rs"
+      - "polyfish-rs/src/actions/**"
+      - "polyfish-rs/src/moves/**"
+      - "polyfish-rs/src/memory.rs"
+      - "polyfish-rs/src/state_fingerprint.rs"
+      - "polyfish-rs/examples/undo_fuzz.rs"
+      - "polyfish-rs/tests/undo_integrity.rs"
+      - "polyfish-rs/tests/common/**"
+      - ".github/workflows/undo_fuzz.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  undo-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ./polyfish-rs
+
+    # The probes need runtime speed, not the shipping profile: `[profile.release]`
+    # is lto="fat" + codegen-units=1, which costs more to build than the fuzz
+    # saves.
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "2"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./polyfish-rs -> target"
+          key: undo-fuzz
+
+      # Targeted, not a blanket `--ignored`: the other ignored items in the
+      # tree are diagnostics and measurement tools, not gates.
+      - name: Undo integrity arms
+        run: cargo test --release --no-default-features --test undo_integrity -- --ignored --nocapture
+
+      - name: Rotating-seed undo fuzz
+        env:
+          START_SEED_INPUT: ${{ inputs.start_seed }}
+          NUM_SEEDS: ${{ inputs.num_seeds }}
+        run: |
+          set -euo pipefail
+          # github.run_number is stable across re-runs of the same run, so a red
+          # nightly replays on exactly the seeds that broke it.
+          start="${START_SEED_INPUT:-$(( ${{ github.run_number }} * 200 + 1 ))}"
+          num="${NUM_SEEDS:-40}"
+          echo "undo_fuzz seeds ${start}..$(( start + num - 1 )) (run number ${{ github.run_number }})"
+          cargo run --release --no-default-features --example undo_fuzz -- \
+            "$num" "$start" 16 \
+            --tribes=core --adversarial=auto --view=auto --mode=alternate --symmetric=true
+
+      # Aquarion/Elyrion/Cymanti exercise fungi, mycelium and sanctuary spawns,
+      # which the fingerprint's iteration order is load-bearing for, but they
+      # have thinner engine coverage. Advisory until a first clean run.
+      - name: Special-tribe undo fuzz (advisory)
+        continue-on-error: true
+        env:
+          START_SEED_INPUT: ${{ inputs.start_seed }}
+        run: |
+          set -euo pipefail
+          start="${START_SEED_INPUT:-$(( ${{ github.run_number }} * 200 + 1 ))}"
+          echo "undo_fuzz --tribes=all seeds ${start}..$(( start + 9 ))"
+          cargo run --release --no-default-features --example undo_fuzz -- \
+            10 "$start" 16 \
+            --tribes=all --adversarial=auto --view=auto --mode=alternate --symmetric=true

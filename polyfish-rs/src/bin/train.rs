@@ -2,12 +2,17 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use polyfish::ai::network::PolyZeroNet;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
 use std::fs;
 use std::path::Path;
 
 const BATCH_SIZE: usize = 64;
 const LEARNING_RATE: f64 = 0.001;
 const EPOCHS: usize = 10;
+/// Pinned so a run is replayable; the sample order still differs per epoch.
+const SHUFFLE_SEED: u64 = 0x504f_4c59_4649_5348;
 
 fn main() -> Result<()> {
     // 1. Setup Device
@@ -123,30 +128,33 @@ fn main() -> Result<()> {
     let w_value = 3.0;
 
     // 5. Training Loop
+    let mut shuffle_rng = SmallRng::seed_from_u64(SHUFFLE_SEED);
+    let mut order: Vec<u32> = (0..n_samples as u32).collect();
+
     for epoch in 1..=EPOCHS {
         let mut total_loss = 0.0;
         let mut total_p_loss = 0.0;
         let mut total_v_loss = 0.0;
         let mut batches = 0;
 
-        // Shuffle indices (approximate shuffle by chunks or full index shuffle)
-        // For simplicity in this example, we iterate sequentially, but ideally should shuffle.
-        // TODO: Implement shuffle
+        // Re-shuffle every epoch: a fixed batch order correlates each gradient
+        // step with the game a sample came from, since self-play writes whole
+        // games contiguously.
+        order.shuffle(&mut shuffle_rng);
 
-        for i in (0..n_samples).step_by(BATCH_SIZE) {
-            let end = (i + BATCH_SIZE).min(n_samples);
-            let batch_size = end - i;
+        for chunk in order.chunks(BATCH_SIZE) {
+            let idx = Tensor::from_slice(chunk, chunk.len(), &device)?;
 
             // Batch data
-            let b_spatial = spatial_maps.narrow(0, i, batch_size)?;
-            let b_player = player_states.narrow(0, i, batch_size)?;
+            let b_spatial = spatial_maps.index_select(&idx, 0)?;
+            let b_player = player_states.index_select(&idx, 0)?;
 
-            let b_t_action = target_action.narrow(0, i, batch_size)?;
-            let b_t_source = target_source.narrow(0, i, batch_size)?;
-            let b_t_target = target_target.narrow(0, i, batch_size)?;
-            let b_t_option = target_option.narrow(0, i, batch_size)?;
+            let b_t_action = target_action.index_select(&idx, 0)?;
+            let b_t_source = target_source.index_select(&idx, 0)?;
+            let b_t_target = target_target.index_select(&idx, 0)?;
+            let b_t_option = target_option.index_select(&idx, 0)?;
 
-            let b_t_win = target_win.narrow(0, i, batch_size)?;
+            let b_t_win = target_win.index_select(&idx, 0)?;
 
             // Forward Pass
             let (policy_out, value_out) = model.forward_t(&b_spatial, &b_player, true)?;

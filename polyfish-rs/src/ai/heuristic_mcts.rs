@@ -1,15 +1,44 @@
 use crate::ai::evaluator;
-use crate::ai::mcts::{MctsAnalysis, MctsNodeData, MoveEvaluation};
 use crate::game::Game;
 use crate::moves::{EndTurnMove, Move};
 use crate::states::PlayerId;
 use crate::types::MoveType;
+use serde::Serialize;
+
+/// Evaluation data for a single move candidate
+#[derive(Debug, Clone, Serialize)]
+pub struct MoveEvaluation {
+    pub src: i32,
+    pub target: i32,
+    pub visits: f32,
+    pub win_rate: f32,
+    pub move_type: MoveType,
+    pub description: String,
+}
+
+/// Analysis results from MCTS search
+#[derive(Debug, Clone, Serialize)]
+pub struct MctsAnalysis {
+    pub evaluations: Vec<MoveEvaluation>,
+    pub total_iterations: usize,
+    pub principal_variation: Vec<String>,
+    pub tree: Option<MctsNodeData>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MctsNodeData {
+    pub visits: f32,
+    pub value: f32,
+    pub move_description: String,
+    pub children: Vec<MctsNodeData>,
+}
 
 pub struct HeuristicMctsAgent {
     pub iterations: usize,
     pub exploration_constant: f32,
-    /// See `mcts_common::next_search_rng`. This agent is the greedy teacher and
-    /// the UI's analysis engine, so its randomness reaches training data.
+    /// See `mcts_common::next_search_rng`. This agent is the UI's analysis
+    /// engine and the interactive trainer's opponent; the anchor teacher is
+    /// `GreedyHeuristicAgent`.
     rng: std::cell::RefCell<rand::rngs::SmallRng>,
 }
 
@@ -30,14 +59,7 @@ impl Node {
         let untried = if game.state.settings._game_over || is_end_turn {
             None
         } else {
-            let book_moves = crate::ai::book::Book::recommend(game);
-
-            let mut filtered = if !book_moves.is_empty() {
-                // If we have book recommendations, strictly follow them
-                book_moves
-            } else {
-                game.legal_moves()
-            };
+            let mut filtered = game.legal_moves();
 
             // Move Ordering: Sort by heuristic score ascending (best moves at the end for .pop())
             filtered.sort_by(|a, b| {
@@ -177,6 +199,8 @@ impl GreedyHeuristicAgent {
             })
             .collect();
 
+        // Dead while TEMPERATURE_MOVE_THRESHOLD is 0; see its doc comment.
+        #[allow(clippy::absurd_extreme_comparisons)]
         let chosen = if move_count < crate::ai::mcts_zero::ZeroMctsAgent::TEMPERATURE_MOVE_THRESHOLD
             && moves.len() > 1
         {
@@ -352,6 +376,8 @@ impl HeuristicMctsAgent {
             })
             .collect();
 
+        // Dead while TEMPERATURE_MOVE_THRESHOLD is 0; see its doc comment.
+        #[allow(clippy::absurd_extreme_comparisons)]
         let sampled_idx = if move_count
             < crate::ai::mcts_zero::ZeroMctsAgent::TEMPERATURE_MOVE_THRESHOLD
             && root.children.len() > 1

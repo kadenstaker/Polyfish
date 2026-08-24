@@ -5,6 +5,10 @@
 #
 # Not run on pull requests: it builds the release binaries and installs a CPU
 # PyTorch, which is minutes, not seconds. Nightly plus manual dispatch.
+#
+# The push filter covers the runtime seam as well as the drivers: an eval-server
+# or network change is exactly the runtime-shaped break this catches and the unit
+# tests do not, and it used to merge green and sit until the next nightly (#48).
 name: Training smoke
 
 on:
@@ -21,6 +25,12 @@ on:
       - "polyfish-rs/ladder.py"
       - "polyfish-rs/src/bin/self_play.rs"
       - "polyfish-rs/src/bin/arena.rs"
+      - "polyfish-rs/src/ai/**"
+      - "polyfish-rs/src/game.rs"
+      - "polyfish-rs/src/moves/**"
+      - "polyfish-rs/Cargo.toml"
+      - "polyfish-rs/Cargo.lock"
+      - "polyfish-rs/requirements.txt"
       - "polyfish-rs/scripts/**"
       - ".github/workflows/smoke.yml"
 

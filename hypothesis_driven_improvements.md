@@ -276,6 +276,15 @@ instrument yet, so none of these has a verdict.** They are all ON by default
 except EXP_SEARCH_001, which means one re-baseline reading cannot separate them —
 plan the re-baseline accordingly.*
 
+*Aug 23, 2026 — a third wave landed (issues #6, #8, #23, #41–#48, #51–#57). It is
+almost entirely tests, CI, tooling and correctness with no free parameter, so it
+adds no ON-by-default arm to the list above. The three exceptions are registered
+below as EXP_TEACH_002, EXP_TEACH_003 and EXP_LABEL_003, and all three are inert
+at HEAD: nothing in the training loop calls the replay import path, and
+`self_play`'s winner rule is unchanged pending a frequency count. Two further
+behaviour changes are recorded under "Also landed" rather than registered,
+because neither has a knob to turn.*
+
 ## EXP_LABEL_001: One zero-sum value label (`REL_W` 0.4 → 1.0)
 *Aug 18, 2026 · REGISTERED, NOT YET RUN*
 
@@ -412,11 +421,42 @@ no army: `clone_for_mcts` (`:258`) confines the in-tree opponent to the root
 player's vision, so it plays a **belief-state** opponent — only the units, cities
 and tiles the root player can currently see. Sign handling was audited in every
 backend (`mcts_zero.rs:57` negates a handover child before comparing siblings via
-`mcts_common::edge_hands_over` `:159`; `mcts.rs:72` minimises at opponent nodes;
-`gumbel_mcts.rs:1290` refuses to re-root tree reuse across a handover).
+`mcts_common::edge_hands_over` `:159`; `gumbel_mcts.rs:1290` refuses to re-root
+tree reuse across a handover). A third site, `mcts.rs::uct_select_child`, was
+audited then too; that file was deleted unused in #57, so a re-audit finds two.
 `tests/adversarial_search.rs` pins the switch and the handover.
 
 **Default OFF.** Nothing in `run_training_loop.sh` sets it.
+
+### Scope of the belief state — the opponent's economy is NOT obscured
+`obscure_fog` (`src/states.rs:650`) hides the opponent's *board*: a tile the root
+player has never explored loses terrain, owner, roads, effects and
+`_unit_owner_id`, and — since #54 — `capital_of`, `climate`,
+`ruling_city_coords`, `had_route` and `skin_type`; resources and structures
+outside vision are dropped, and out-of-vision units and cities are removed from
+the opponent's tribe with its fog memory cleared. It does **not** touch
+`TribeState::stars` (`:381`), `tech_vanilla` (`:396`), `score` (`:379`),
+`relations` (`:402`), `known_players` (`:375`),
+`built_unique_improvements` (`:373`) or `starting_tile_coords` (`:408`). So the
+in-tree opponent fights with a belief-state army on a belief-state map while
+spending its **true** stars, researching from its **true** tech tree, and
+carrying a `starting_tile_coords` that still names its original capital tile
+after that tile has been blanked.
+
+This is deliberate for now and is part of what this arm measures, not a separate
+bug. Blanking the economy is not obviously more correct: a zeroed-stars opponent
+under-buys and is a *weaker* model than a true-economy one, and a sampled or
+averaged economy is a determinization design this repo has not built. The
+asymmetry is recorded here so a null result is attributed correctly — "the
+belief state is unfaithful" and "adversarial search does not help" are different
+conclusions.
+
+**Not part of #54, and not to be folded into it.** Nothing blanks enemy stars or
+tech today. `stars` and `tech_vanilla` gate the opponent's own
+`generate_legal_moves` (`moves/mod.rs`, `moves/research.rs`, `moves/build.rs`),
+so zeroing them changes which moves it can consider at all. If it is measured it
+must be a third arm — adversarial + true economy vs adversarial + blank economy
+vs non-adversarial — on the same seed set.
 
 ### Expected Results
 Head-to-head at equal sims, 32 seeds sides-swapped, same weights both sides:
@@ -430,7 +470,9 @@ compare at equal **wall-clock**, not only at equal sims.
 that the null opponent was not the binding constraint. Note the honest weakness
 of the fix before running it: a belief-state opponent that can only move what we
 can see is a *weak* opponent model, not a correct one — a null result may be
-about the belief state rather than about adversarial search.
+about the belief state rather than about adversarial search, and the belief
+state is unfaithful in two known ways — the vision-confined army and the
+un-obscured economy recorded above.
 
 ### Actual Results
 NOT YET RUN.
@@ -704,6 +746,127 @@ arm and cannot distinguish them.
 NOT YET RUN.
 
 
+## EXP_TEACH_002: Train on derived-result teacher data from mod captures
+*Aug 23, 2026 · REGISTERED, NOT YET RUN*
+
+`replay::outcome::derive_result` (#42) unlocks `import_replays export-training`
+for replays that carry no `result`, which is every mod capture and every
+historical result-less replay. Landing it changed no training behaviour —
+`TrainingCollector`'s only caller is the `import_replays` binary, which no shell
+or python driver runs — but the moment a campaign trains on the
+`games_pro_*.safetensors` those exports produce, that IS an experiment:
+`train.py` routes `games_pro_*` out of the self-play rotation into `teachers/`,
+and per #36 teacher files always train and never rotate out, so a bad label is
+permanent for the run.
+
+**Hypothesis:** behaviour-cloning on human/mod captures with engine-derived ±1
+outcome labels raises the gauge reading against the active anchor more than the
+same iteration budget spent on self-play alone.
+
+### Benchmark
+The standing gauge: `arena` at the pinned seed and tribe pair, iteration-matched
+`max_turns` and curriculum knobs, against a teacher-free control run from the
+same checkpoint.
+
+### Expected Results
+Mean of the first 3 post-import readings ≥ the control's matched window + 8pp
+(the same effect size every EXP_ELO bar is sized against; at 64 games a reading
+resolves ~±12pp, so read the trend, not one reading).
+
+### Falsifier
+A paired reading flat or down against the control → REJECT, and record whether
+the teacher set was too small or the labels too noisy before re-trying.
+
+**Guard rails already in place:** the derivation refuses a non-terminal final
+state, so no truncated replay can enter the buffer with a score-proxy label;
+every derived file is named in the dataset manifest's `derivedResultSourceFiles`
+and counted by `import_replays`' `derivedResultFiles`. Check both before
+admitting a batch of teacher files.
+
+### Actual Results
+NOT YET RUN.
+
+## EXP_TEACH_003: Version-gated teacher selection
+*Aug 23, 2026 · REGISTERED, NOT YET RUN*
+
+`validate_training_eligibility` now refuses replays outside
+`MIN..=MAX_SUPPORTED_GAME_VERSION` (105..=`CURRENT_VERSION`), which is teacher-data
+*selection*, not a correctness fix (#44). It is behaviour-neutral at HEAD: no
+shell or python script invokes `import_replays`, `polyfish-rs/replays/` holds
+only `high_scores/.gitkeep`, and `polyfish-rs/teachers/` does not exist, so no
+`games_pro_*.safetensors` has ever been produced under either rule.
+
+**Hypothesis:** excluding out-of-range captures raises teacher-label fidelity —
+a capture from a ruleset the engine does not implement is re-derived under
+today's rules, so its samples are mislabelled while every command still looks
+legal — and therefore does not cost gauge strength relative to importing
+everything with `--allow-version-drift`.
+
+### Benchmark
+Two imports of the same replay archive, gated and `--allow-version-drift`, each
+trained for the same iteration budget from the same checkpoint, graded on the
+standing gauge. Record `failuresByVersion` and `versionDriftFiles` for both.
+
+### Expected Results
+The gated arm is within ±5pp of the drift arm at equal teacher-file *count*, and
+ahead of it when the excluded files are a material share of the archive.
+
+### Falsifier
+The gated arm reads materially worse (>5pp) → the range is too narrow and the
+excluded rulesets are close enough to today's to be worth their samples;
+widen `MIN_SUPPORTED_GAME_VERSION` rather than defaulting the override on.
+
+**Sequencing:** this is only measurable once EXP_TEACH_002 has a teacher set at
+all. Until then, record here how many files the gate excluded and whether the
+resulting teacher set changed the value-label mix, before attributing any Elo
+movement to an import.
+
+### Actual Results
+NOT YET RUN.
+
+## EXP_LABEL_003: Unify `self_play`'s winner rule with the living-only rule
+*Aug 23, 2026 · REGISTERED, NOT YET RUN*
+
+`self_play.rs:1031-1041` resolves the winner as the sole survivor only when
+exactly one tribe is alive; otherwise it maxes over **all** scores, dead tribes
+included, and never reports a draw. `ai::mcts_common::compute_terminal_outcome`
+and `replay::outcome::derive_result` both restrict the turn-limit tiebreak to
+living tribes and both report mutual elimination as a draw. The disagreement is
+reachable on any timed-out game: a tribe eliminated at turn 12 keeps its tech,
+monument, park and exploration score and can outrank both survivors.
+
+`winner_id` does not reach `outcome_for`'s value label on a non-decisive game
+(that path uses the score blend), but it does reach two live surfaces: the
+self-play recap's `ReplayResult.winner_player_id` (`self_play.rs:1107`), which
+is exactly what a later training export would read, and the anchor win-rate
+metric (`self_play.rs:2149-2153`), which is counted for **every** game with an
+anchor seat, decisive or not, and so feeds the anchor gate.
+
+**Hypothesis:** restricting the tiebreak to living tribes and reporting a draw
+on mutual elimination makes `anchor_model_wr` a truthful reading; the current
+rule credits the model for timed-out games it did not win.
+
+### Benchmark
+Count, over one iteration of self-play at the current curriculum, the games where
+`alive_tribes.len() != 1` **and** the score max is a dead tribe. Then compare
+`anchor_model_wins / anchor_games_n` under both rules on the same games.
+
+### Expected Results
+If the case fires at all, `anchor_model_wr` moves down by the frequency of the
+case, and the anchor graduation gate fires later than it does today.
+
+### Falsifier
+No measurable shift in `anchor_model_wr` across a run, i.e. the dead-high-scorer
+case never fires at the current `max_turns` → this is a correctness cleanup
+rather than an experiment, and it lands without a reading.
+
+**Sequencing:** measure the frequency first. Changing the rule before knowing it
+fires would be a training-behaviour change bought with no evidence.
+
+### Actual Results
+NOT YET RUN.
+
+
 ## Also landed Aug 18 — behaviour-affecting, not separately registered
 
 Correctness and integrity fixes with no free parameter to tune, listed so a
@@ -760,6 +923,24 @@ behaviour change is never mistaken for noise:
   comparable with one taken after this fix. Found by the new
   `scripts/run_forward_parity.sh` on its first run; see audit T1 for the
   measurements, including why a batch-invariance test does not catch it.
+- **The opening book no longer forces a move** (#57). On game turns 0–1 the Zero
+  path shuffled the book's matching legal moves, played one, and fabricated the
+  policy target to match — a one-hot in `select_move_with_stats`, a single
+  full-iteration-count `MoveVisit` in `select_move_with_decomposed_visits` — so a
+  book turn taught the policy head a distribution no search ever produced; the
+  heuristic path replaced every node's untried set, not just the root's. Both
+  call sites are retired and `tests/test_book_not_forced.rs` pins it. Off the
+  training path as the pipeline is configured (Gumbel is `self_play`'s default
+  backend and never consulted the book, no driver passes `--search-backend`, and
+  the anchor teacher reads `legal_moves` directly), so what changes is hand-run
+  diagnostics on the zero/heuristic backends for the first two game turns.
+- **A terrain past its block folds onto the block's `None` slot** (#46).
+  `terrain_to_channel(Mangrove)` returned `CH_TILE_FROZEN`, the first channel of
+  the next block, because `TerrainType` outgrew `TERRAIN_COUNT`. Only
+  JSON-loaded states (mod / reader / replay) can carry a Mangrove tile — mapgen
+  never emits one — so no self-play data was affected and no archived
+  `games_*.safetensors` changes meaning. Listed here because the encoding of a
+  loaded state does change.
 - **The Gumbel agent owns its RNG.** `GumbelMctsAgent::with_search_seed(u64)`
   pins the stream; `POLYFISH_SEARCH_SEED` pins a base that still differs per
   agent, because a stream shared across actors would make every actor play the

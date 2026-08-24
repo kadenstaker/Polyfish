@@ -1,5 +1,5 @@
 use crate::ai::features::{self, RawFeatures};
-use crate::ai::mapper::{DecomposedMapper, DecomposedTargets};
+use crate::ai::mapper::{DecomposedMapper, DecomposedTargets, NUM_MOVE_OPTIONS};
 use crate::ai::network::NUM_ACTION_TYPES;
 use crate::functions::get_tribe_spt;
 use crate::game::Game;
@@ -16,7 +16,7 @@ use strum::IntoEnumIterator;
 use super::{
     ACTION_SCHEMA_VERSION, DATASET_SCHEMA_VERSION, FEATURE_SCHEMA_VERSION, REPLAY_SCHEMA_VERSION,
     Replay, ReplayCommand, ReplayError, ReplayMoveContext, ReplayObserver, ReplayResult,
-    validate_training_eligibility,
+    derive_result, validate_training_eligibility_with,
 };
 
 struct PendingSample {
@@ -35,7 +35,12 @@ pub struct TrainingCollector {
 
 impl TrainingCollector {
     pub fn new(replay: &Replay) -> Result<Self, ReplayError> {
-        validate_training_eligibility(replay)?;
+        Self::new_with(replay, false)
+    }
+
+    /// `allow_version_drift` is forwarded to `validate_training_eligibility_with`.
+    pub fn new_with(replay: &Replay, allow_version_drift: bool) -> Result<Self, ReplayError> {
+        validate_training_eligibility_with(replay, allow_version_drift)?;
         Ok(Self {
             samples: Vec::new(),
         })
@@ -55,11 +60,15 @@ impl TrainingCollector {
         result: Option<&ReplayResult>,
         source_file: &Path,
     ) -> Result<Vec<TrainingSample>, ReplayError> {
-        let result = result.ok_or_else(|| {
-            ReplayError::Training(
-                "behavior-cloning export requires replay.result for value labels".into(),
-            )
-        })?;
+        let result_is_derived = result.is_none();
+        let derived;
+        let result = match result {
+            Some(result) => result,
+            None => {
+                derived = derive_result(game)?;
+                &derived
+            }
+        };
         let total_cities = game
             .state
             .tribes
@@ -160,6 +169,7 @@ impl TrainingCollector {
                     .unwrap_or_else(|| vec![0.0; tech_order.len()]),
                 aux_mask: 1.0,
                 source_file: source_file.display().to_string(),
+                result_is_derived,
             });
         }
         Ok(out)
@@ -232,6 +242,8 @@ pub struct TrainingSample {
     aux_opp_tech: Vec<f32>,
     aux_mask: f32,
     source_file: String,
+    /// The value label came from `derive_result`, not from a captured result.
+    result_is_derived: bool,
 }
 
 impl TrainingSample {
@@ -288,6 +300,9 @@ pub struct DatasetManifest {
     pub move_option_dim: usize,
     pub num_samples: usize,
     pub source_files: Vec<String>,
+    /// Subset of `source_files` whose value labels were synthesized by
+    /// `derive_result` rather than read off a captured result.
+    pub derived_result_source_files: Vec<String>,
 }
 
 pub fn write_training_files(
@@ -329,7 +344,7 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
     let mut action = vec![0.0f32; n * NUM_ACTION_TYPES];
     let mut source = vec![0.0f32; n * area];
     let mut target = vec![0.0f32; n * area];
-    let mut option = vec![0.0f32; n * 192];
+    let mut option = vec![0.0f32; n * NUM_MOVE_OPTIONS];
     let mut values = Vec::with_capacity(n);
     let mut progress = Vec::with_capacity(n);
     let mut progress_mask = Vec::with_capacity(n);
@@ -339,6 +354,7 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
     let mut opp_tech = Vec::with_capacity(n * tech_dim);
     let mut aux_mask = Vec::with_capacity(n);
     let mut source_files = BTreeSet::new();
+    let mut derived_result_source_files = BTreeSet::new();
 
     for (row, sample) in samples.iter().enumerate() {
         spatial.extend_from_slice(&sample.features.spatial);
@@ -351,7 +367,7 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
             target[row * area + i] = 1.0;
         }
         if let Some(i) = sample.targets.target_type {
-            option[row * 192 + i] = 1.0;
+            option[row * NUM_MOVE_OPTIONS + i] = 1.0;
         }
         values.push(sample.value);
         progress.push(sample.progress);
@@ -362,6 +378,9 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
         opp_tech.extend_from_slice(&sample.aux_opp_tech);
         aux_mask.push(sample.aux_mask);
         source_files.insert(sample.source_file.clone());
+        if sample.result_is_derived {
+            derived_result_source_files.insert(sample.source_file.clone());
+        }
     }
 
     let device = Device::Cpu;
@@ -385,7 +404,10 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
     );
     tensors.insert("source_spatial".into(), tensor(source, &[n, area])?);
     tensors.insert("target_spatial".into(), tensor(target, &[n, area])?);
-    tensors.insert("move_option".into(), tensor(option, &[n, 192])?);
+    tensors.insert(
+        "move_option".into(),
+        tensor(option, &[n, NUM_MOVE_OPTIONS])?,
+    );
     tensors.insert("progress".into(), tensor(progress, &[n, 1])?);
     tensors.insert("progress_mask".into(), tensor(progress_mask, &[n])?);
     tensors.insert("aux_ownership".into(), tensor(ownership, &[n, area])?);
@@ -406,9 +428,10 @@ fn write_chunk(samples: &[TrainingSample], path: &Path) -> Result<(), ReplayErro
         map_width: features::MAP_SIZE,
         map_height: features::MAP_SIZE,
         num_action_types: NUM_ACTION_TYPES,
-        move_option_dim: 192,
+        move_option_dim: NUM_MOVE_OPTIONS,
         num_samples: n,
         source_files: source_files.into_iter().collect(),
+        derived_result_source_files: derived_result_source_files.into_iter().collect(),
     };
     let manifest_path = PathBuf::from(format!("{}.manifest.json", path.display()));
     let json = serde_json::to_vec_pretty(&manifest)

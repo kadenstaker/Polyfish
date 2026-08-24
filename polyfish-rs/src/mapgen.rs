@@ -11,6 +11,7 @@ use crate::functions::{
 };
 use crate::states::{GameState, TileState, TribeState};
 use crate::types::{MapSize, MapType, TerrainType, TribeType};
+use crate::version_sync::{CURRENT_VERSION, GameVersion, is_at_least};
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
 
@@ -53,7 +54,7 @@ impl Default for MapGenSettings {
             map_type: MapType::Continents,
             tribes: vec![TribeType::Imperius, TribeType::Bardur],
             seed: 0,
-            version: 115,
+            version: CURRENT_VERSION,
             symmetric: false,
         }
     }
@@ -1345,8 +1346,8 @@ pub fn generate(settings: MapGenSettings) -> GameState {
         }
     }
 
-    // Place Lighthouses on all 4 corners if version >= 114
-    if settings.version >= 114 {
+    // Place Lighthouses on all 4 corners from BalancePass2025 on
+    if is_at_least(settings.version, GameVersion::BalancePass2025) {
         let corners = [0, size - 1, size * (size - 1), size * size - 1];
         for &idx in &corners {
             map[idx as usize].above = Some("lighthouse".to_string());
@@ -1785,7 +1786,7 @@ mod tests {
                     map_type,
                     tribes: vec![TribeType::Imperius, TribeType::Bardur],
                     seed: 42, // Fixed seed for reproducibility
-                    version: 115,
+                    version: CURRENT_VERSION,
                     ..Default::default()
                 };
                 let state = generate(settings);
@@ -1844,7 +1845,7 @@ mod tests {
                         map_type,
                         tribes: vec![TribeType::Imperius, TribeType::Bardur],
                         seed,
-                        version: 115,
+                        version: CURRENT_VERSION,
                         ..Default::default()
                     };
                     let state = generate(settings);
@@ -1885,7 +1886,7 @@ mod tests {
             map_type: MapType::Drylands,
             tribes: vec![TribeType::Imperius, TribeType::Imperius],
             seed: 123,
-            version: 115,
+            version: CURRENT_VERSION,
             ..Default::default()
         };
         let state = generate(settings);
@@ -1943,7 +1944,7 @@ mod tests {
                         map_type,
                         tribes: vec![TribeType::Imperius, TribeType::Bardur],
                         seed,
-                        version: 115,
+                        version: CURRENT_VERSION,
                         ..Default::default()
                     };
                     let state = generate(settings);

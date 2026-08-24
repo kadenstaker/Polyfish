@@ -247,6 +247,39 @@ ARCHIVE_KEEP=$(scaled 10)
 export REPLAY_BUFFER_FILES=$ARCHIVE_KEEP
 echo "Schedule (games-based, -g $NUM_GAMES vs baseline $BASELINE_GAMES): $ITERATIONS iterations, checkpoint every $CHECKPOINT_EVERY, milestone every $MILESTONE_EVERY, league every $LEAGUE_INTERVAL iterations, replay window $ARCHIVE_KEEP files"
 
+# Off-box durability for the experiment record: training_log.csv, ladder.json
+# and checkpoints/ are the only record of a campaign that a rerun cannot
+# reproduce, and without POLYFISH_BACKUP_DIR they live on this disk alone.
+# Snapshots ride the checkpoint cadence so the second disk always holds a
+# complete restore point - the weights, plus the log and ladder rows that say
+# what those weights scored - and one more is taken on exit, so a run that
+# aborts mid-window still leaves everything since the last snapshot.
+BACKUP_EVERY="${POLYFISH_BACKUP_EVERY:-$CHECKPOINT_EVERY}"
+RECORD_DIRTY=0
+if [ -n "${POLYFISH_BACKUP_DIR:-}" ]; then
+    echo "Backup: snapshotting the experiment record to $POLYFISH_BACKUP_DIR every $BACKUP_EVERY iterations and on exit"
+else
+    echo "WARNING: POLYFISH_BACKUP_DIR is unset - the experiment record will live on this disk only." >&2
+    echo "         Point it at another disk/volume to snapshot training_log.csv, ladder.json and" >&2
+    echo "         checkpoints/ (see scripts/backup_experiment_record.sh --help)." >&2
+fi
+
+# Deliberately never fatal: an unreachable or full backup target must not end a
+# campaign that is otherwise healthy, so a failure is reported loudly on stderr
+# and the run continues. Exit 3 means the snapshot published but an item looked
+# suspect, so the record IS on the second disk.
+snapshot_record () {
+    [ -n "${POLYFISH_BACKUP_DIR:-}" ] || return 0
+    local status=0
+    ./scripts/backup_experiment_record.sh "$POLYFISH_BACKUP_DIR" || status=$?
+    case "$status" in
+        0) RECORD_DIRTY=0 ;;
+        3) RECORD_DIRTY=0
+           echo "BACKUP: snapshot published with suspect items ($1); see its MANIFEST." >&2 ;;
+        *) echo "BACKUP: snapshot failed (exit $status, $1) - the experiment record is still on one disk." >&2 ;;
+    esac
+}
+
 REWARD_FLAG=""
 if [ "$REWARD_SHAPING" = true ]; then
     REWARD_FLAG="--reward-shaping"
@@ -372,6 +405,9 @@ fi
 
 cleanup() {
     .venv/bin/python3 training_log.py finish-run 2>/dev/null || true
+    if [ "${RECORD_DIRTY:-0}" = 1 ]; then
+        snapshot_record "run exit"
+    fi
     if [ -n "${SERVER_PID:-}" ]; then
         kill "$SERVER_PID" 2>/dev/null || true
     fi
@@ -429,6 +465,7 @@ fi
 for ((i=START_ITER; i<START_ITER+ITERATIONS; i++))
 do
     ITER_STARTED_AT=$(.venv/bin/python3 training_log.py now-iso)
+    RECORD_DIRTY=1
     echo "=================================================="
     echo "Starting Iteration $i"
     echo "=================================================="
@@ -750,6 +787,23 @@ do
             fi
         }
 
+        # Joint Bradley-Terry fit over every reading the ladder holds, refit
+        # from scratch into the file /api/elo-ladder serves. The verdict's
+        # elo_est below is one match against one anchor chained onto that
+        # anchor's own number; this is the whole graph at once, with bootstrap
+        # intervals. Derived data, recomputable from ladder.json at any time,
+        # so a failure is reported and the run continues - unlike the reading
+        # itself, which is fatal.
+        refit_elo () {
+            local out
+            if out=$(.venv/bin/python3 elo.py fit --source ladder \
+                    --ladder ladder.json --out elo_ratings.json --quiet); then
+                echo "ELO: $out"
+            else
+                echo "ELO: joint refit failed (non-fatal); elo_ratings.json is stale" >&2
+            fi
+        }
+
         # A failed reading is fatal: the ladder is the instrument every
         # experiment is judged on, and continuing past a broken gauge is what
         # left the whole campaign without a single recorded reading.
@@ -784,6 +838,17 @@ do
                  "games (this reading: $(( GAUGE_GAMES * 2 ))). Trend across readings, not one reading."
         fi
 
+        # The same games read per seed across arena's side swap (audit M3): the
+        # seed is the unit of evidence, so whatever the map handed a seat
+        # cancels inside the pair. rho is what the swap left behind -- negative
+        # means it paid, and `ladder.py power --rho` sizes the next budget on
+        # it. Reported only; no verdict reads it.
+        GAUGE_PAIRED_WR=$(json_get paired_win_rate "" <<< "$VERDICT")
+        if [ -n "$GAUGE_PAIRED_WR" ]; then
+            echo "GAUGE: paired over seeds: ${GAUGE_PAIRED_WR} +/-$(json_get paired_resolves_pp "?" <<< "$VERDICT")pp" \
+                 "(rho $(json_get paired_rho "?" <<< "$VERDICT"); unpaired +/-$(json_get resolves_pp "?" <<< "$VERDICT")pp)"
+        fi
+
         # EXP_ELO_002: first >=50% reading vs the greedy anchor starts
         # the anchor-frac decay clock (EFF_ITER units, matching
         # --anchor-decay-start above).
@@ -816,7 +881,9 @@ do
                 --avg-score-model "${GAUGE_S1:-0}" --avg-score-opponent "${GAUGE_S2:-0}" \
                 --tribes "$GAUGE_TRIBES"
         elif [ "$GAUGE_ACTION" = "stop" ]; then
+            refit_elo
             rm -f "$GAUGE_LOG"
+            PLATEAU_STOP=1
             echo "=================================================="
             echo "PLATEAU STOP at iteration $i: two consecutive 8-reading"
             echo "windows flat-or-down with slope <= 0 vs the active anchor"
@@ -843,7 +910,7 @@ do
                     --avg-score-model "${GAUGE_S1:-0}" --avg-score-opponent "${GAUGE_S2:-0}" \
                     --mcts "$MCTS_ITERS" --gumbel-k "$GUMBEL_K" --eval-backend "${GAUGE_BACKEND:-}" \
                     --wins-p1 "${GAUGE_WP1:-0}" --wins-p2 "${GAUGE_WP2:-0}" \
-                    --tribes "$GAUGE_TRIBES" \
+                    --tribes "$GAUGE_TRIBES" --max-turns "$GAUGE_MAX_TURNS" \
                     --prior-heuristic-w "$GAUGE_PRIOR_W" --q-weight "$GAUGE_Q_W" \
                     --stats-dir "$GAUGE_STATS_DIR"
             done < <(.venv/bin/python3 ladder.py audit-opponents | json_array_items)
@@ -873,7 +940,21 @@ do
                 fi
             fi
         fi
+        refit_elo
         rm -f "$GAUGE_LOG"
     fi
 
+    # 7. Off-box snapshot. Last in the iteration, so it holds this iteration's
+    # checkpoint together with the log row and gauge reading that grade it.
+    if [ "$BACKUP_EVERY" -gt 0 ] && [ $((i % BACKUP_EVERY)) -eq 0 ]; then
+        snapshot_record "iteration $i"
+    fi
+
 done
+
+# A plateau stop is a decision, not a spent iteration budget. Exit distinctly so a
+# supervisor that restarts on a clean finish does not restart straight back into
+# the same verdict (#56).
+if [ "${PLATEAU_STOP:-0}" = "1" ]; then
+    exit 3
+fi

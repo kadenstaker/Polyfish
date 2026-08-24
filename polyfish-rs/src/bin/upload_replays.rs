@@ -1,22 +1,6 @@
+use polyfish::replay::{REPLAY_DIR, canonical_replay_file_name, is_canonical_replay_file};
 use std::env;
 use std::fs;
-
-fn sanitize_storage_key(name: &str) -> String {
-    let mut result = String::new();
-    let mut last_was_dash = false;
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-            result.push(c.to_ascii_lowercase());
-            last_was_dash = false;
-        } else {
-            if !last_was_dash && !result.is_empty() {
-                result.push('-');
-                last_was_dash = true;
-            }
-        }
-    }
-    result.trim_matches('-').to_string()
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,12 +19,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bucket_name = env::var("SUPABASE_STORAGE_BUCKET").unwrap_or_else(|_| "games".to_string());
     let client = reqwest::Client::new();
 
-    let entries = fs::read_dir("replays")?;
+    let entries = fs::read_dir(REPLAY_DIR)?;
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
 
-        if !path.is_file() || !path.to_string_lossy().ends_with(".replay.json") {
+        if !path.is_file() || !is_canonical_replay_file(&path) {
             continue;
         }
 
@@ -84,15 +68,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .send()
             .await?;
 
-        if let Ok(json) = check_req.json::<serde_json::Value>().await {
-            if let Some(arr) = json.as_array() {
-                if !arr.is_empty() {
-                    println!(
-                        "⚠️ Rejected duplicate game (UUID or Seed/Name): {}",
-                        game_name
-                    );
+        // Fail closed: anything short of a 2xx array body skips the upload rather
+        // than falling through and creating a duplicate.
+        let check_status = check_req.status();
+        if !check_status.is_success() {
+            let body = check_req.text().await.unwrap_or_default();
+            println!("❌ Duplicate check failed for {game_name} ({check_status}): {body}");
+            continue;
+        }
+        match check_req.json::<serde_json::Value>().await {
+            Ok(json) => match json.as_array() {
+                Some(rows) if !rows.is_empty() => {
+                    println!("⚠️ Rejected duplicate game (UUID or Seed/Name): {game_name}");
                     continue;
                 }
+                Some(_) => {}
+                None => {
+                    println!("❌ Duplicate check returned a non-array body for {game_name}");
+                    continue;
+                }
+            },
+            Err(e) => {
+                println!("❌ Duplicate check body unreadable for {game_name}: {e}");
+                continue;
             }
         }
 
@@ -101,11 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap()
             .as_secs();
 
-        let file_name = format!(
-            "{}_{}.replay.json",
-            sanitize_storage_key(game_name),
-            timestamp
-        );
+        let file_name = canonical_replay_file_name(game_name, timestamp);
         let storage_url = format!(
             "{}/storage/v1/object/{}/{}",
             supabase_url.trim_end_matches('/'),

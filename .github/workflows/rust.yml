@@ -141,16 +141,13 @@ jobs:
         with:
           workspaces: "./polyfish-rs -> target"
 
-      # BLOCKING. The clippy correctness group minus the two lints that already
-      # fire at HEAD (absurd_extreme_comparisons in gumbel_mcts/heuristic_mcts/
-      # mcts_zero, never_loop in mcts_zero). Fix those six sites and delete the
-      # two -A lines to make the whole group blocking.
+      # BLOCKING, and now with no carve-outs: the correctness group used to be
+      # globally -A'd for absurd_extreme_comparisons and never_loop, which meant
+      # a new violation anywhere in the tree was admitted silently. The seven
+      # sites that fired are now scoped allows at the exact statement, each with
+      # its reason (five dead opening-temperature branches, two loops-as-blocks).
       - name: Clippy (correctness)
-        run: |
-          cargo clippy --no-default-features --all-targets -- \
-            -D clippy::correctness \
-            -A clippy::absurd_extreme_comparisons \
-            -A clippy::never_loop
+        run: cargo clippy --no-default-features --all-targets -- -D clippy::correctness
 
       # NON-BLOCKING. Measured 2026-08-18: 395 warnings across lib + tests, of
       # which 241 are collapsible_if (the edition-2024 let-chain suggestion) and
@@ -177,9 +174,19 @@ jobs:
   #   metal / accelerate / metal-eval  - macOS only, advisory: these have never
   #                                      run in CI before, so a first failure is
   #                                      a CI bug to fix, not a merge blocker.
+  #   metal-eval+tch-eval              - macOS only, advisory, compile only. It
+  #                                      exists because metal_parity/metal_bench
+  #                                      carry required-features on BOTH (see
+  #                                      Cargo.toml), so --all-targets silently
+  #                                      skipped them on every single-feature row
+  #                                      and metal_parity had never compiled here.
   #   tch-eval                         - macOS only, advisory: needs a pinned
   #                                      PyTorch 2.12 from pip plus the bypass
-  #                                      env vars in Cargo.toml.
+  #                                      env vars in Cargo.toml. This row also
+  #                                      RUNS tch_parity (candle-CPU vs tch-CPU),
+  #                                      the first execution of a non-candle
+  #                                      backend anywhere in CI; its MPS half
+  #                                      self-skips when has_mps() is false.
   #   cuda / cudnn                     - NOT checked anywhere. No hosted runner
   #                                      here has nvcc; wiring one up needs a
   #                                      CUDA toolkit action or a self-hosted
@@ -212,6 +219,10 @@ jobs:
             os: macos-latest
             features: "tch-eval"
             advisory: true
+          - label: metal-eval+tch-eval
+            os: macos-latest
+            features: "metal-eval,tch-eval"
+            advisory: true
 
     steps:
       - uses: actions/checkout@v4
@@ -222,13 +233,17 @@ jobs:
           workspaces: "./polyfish-rs -> target"
           key: ${{ matrix.label }}
 
+      # Guarded on the feature, not the label, so the combined row links too.
+      # requirements.txt comes along because init_model.py needs safetensors.
       - name: Install PyTorch for tch-eval
-        if: matrix.label == 'tch-eval'
+        if: contains(matrix.features, 'tch-eval')
         working-directory: ./polyfish-rs
         run: |
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install 'torch==2.12.*'
+          .venv/bin/pip install -r requirements.txt
+          TORCH=$(sed -n 's/^# POLYFISH_TORCH_VERSION=//p' requirements.txt)
+          .venv/bin/pip install "torch==$TORCH"
 
       - name: Compile-check
         working-directory: ./polyfish-rs
@@ -242,3 +257,26 @@ jobs:
           else
             cargo check --no-default-features --features "${{ matrix.features }}" --all-targets
           fi
+
+      # tch_parity has only ever been compile-checked, so this is its first
+      # execution anywhere in CI: a failure on dyld linkage is a CI bug, a
+      # failure on a numeric delta is a real parity finding. Only the plain
+      # tch-eval row runs it - the combined row stays a pure compile check.
+      # Debug build on purpose: the release profile is lto="fat" and the example
+      # is eight forward passes.
+      - name: tch parity (advisory)
+        if: matrix.label == 'tch-eval'
+        continue-on-error: true
+        working-directory: ./polyfish-rs
+        env:
+          LIBTORCH_USE_PYTORCH: 1
+          LIBTORCH_BYPASS_VERSION_CHECK: 1
+        run: |
+          export PATH="$(pwd)/.venv/bin:$PATH"
+          # The tch-linked binary has no rpath for libtorch (run_training_loop.sh:93).
+          TORCH_LIB=$(.venv/bin/python3 -c 'import torch, os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')
+          export DYLD_LIBRARY_PATH="$TORCH_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          # tch_parity hardcodes the relative path model.safetensors, and
+          # init_model.py imports train.py off the cwd, so both need this dir.
+          .venv/bin/python3 init_model.py
+          cargo run --no-default-features --features tch-eval --example tch_parity

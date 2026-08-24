@@ -25,6 +25,7 @@ use crate::settings::get_unit_setting;
 use crate::settings::has_technology;
 use crate::states::*;
 use crate::types::*;
+use crate::version_sync::{GameVersion, is_before};
 
 /// Get the current player's tribe (POV = Point of View)
 pub fn get_pov_tribe(state: &GameState) -> Option<&TribeState> {
@@ -358,7 +359,9 @@ pub fn get_unit_attack(state: &GameState, unit: &UnitState) -> f32 {
         }
     }
 
-    if has_effect(unit, UnitEffect::Boosted) && state.settings.version < 115 {
+    if has_effect(unit, UnitEffect::Boosted)
+        && is_before(state.settings.version, GameVersion::CymantiRework)
+    {
         atk += 0.5;
     }
     atk

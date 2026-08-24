@@ -19,9 +19,9 @@ pub struct ZeroMctsAgent<'a> {
     pub c_puct: f32,
     pub batch_size: usize,
     pub virtual_loss: f32,
-    /// The agent's own randomness (opening-book shuffles, Dirichlet root noise,
-    /// the temperature sample). Owned rather than drawn from the thread-local
-    /// generator so a search can be replayed — see `mcts_common::next_search_rng`.
+    /// The agent's own randomness (Dirichlet root noise, the temperature
+    /// sample). Owned rather than drawn from the thread-local generator so a
+    /// search can be replayed — see `mcts_common::next_search_rng`.
     rng: RefCell<rand::rngs::SmallRng>,
 }
 
@@ -150,21 +150,6 @@ impl<'a> ZeroMctsAgent<'a> {
     }
 
     pub fn select_move(&self, game: &mut Game) -> Option<Box<dyn Move>> {
-        // 1. Check Opening Book
-        use crate::ai::book::Book;
-        use rand::seq::SliceRandom;
-        // recommend returns Vec<Box<dyn Move>>.
-        // We can't use .choose() because that returns &Box<dyn Move> which we can't clone.
-        // Instead, we shuffle and pop.
-        let mut book_moves = Book::recommend(game);
-        if !book_moves.is_empty() {
-            let mut rng = self.rng.borrow_mut();
-            book_moves.shuffle(&mut *rng);
-            if let Some(m) = book_moves.pop() {
-                return Some(m);
-            }
-        }
-
         let start_turn = game.state.settings.turn;
         let mut root = ZeroNode::new(1.0, None);
         // Initial expansion (single)
@@ -187,49 +172,6 @@ impl<'a> ZeroMctsAgent<'a> {
     }
 
     pub fn select_move_with_stats(&self, game: &mut Game) -> (Option<Box<dyn Move>>, Vec<f32>) {
-        // 1. Check Opening Book
-        use crate::ai::book::Book;
-        use rand::seq::SliceRandom;
-
-        // We need to handle book moves but also return valid stats (policy) matching the legal moves order.
-        let mut book_moves = Book::recommend(game);
-        if !book_moves.is_empty() {
-            let mut rng = self.rng.borrow_mut();
-            book_moves.shuffle(&mut *rng);
-            if let Some(book_move) = book_moves.pop() {
-                // To return correct policy vector, we must know the legal moves order.
-                // So we expand the root node once.
-                let mut root = ZeroNode::new(1.0, None);
-                self.expand_node_single(&mut root, game, false);
-
-                // Find the index of the book move in the children
-                let num_children = root.children.len();
-                let mut policy = vec![0.0f32; num_children.max(1)];
-
-                let mut found_idx = None;
-                for (i, child) in root.children.iter().enumerate() {
-                    if let Some(m) = &child.move_to_here {
-                        // Compare move types and critical fields
-                        // Simple equality might not work if Move doesn't implement partialEq correctly for all types,
-                        // but typically we can check describe() or similar.
-                        // For now, let's assume filtering in `recommend` ensured it's a legal move.
-                        // We key off move_type and target for strictness, or just trust `recommend` returned a valid match.
-                        // Let's match by description to be safe? Or simple type + indices.
-                        if m.describe(&game.state) == book_move.describe(&game.state) {
-                            found_idx = Some(i);
-                            break;
-                        }
-                    }
-                }
-
-                if let Some(idx) = found_idx {
-                    policy[idx] = 1.0;
-                    return (Some(book_move), policy);
-                }
-                // If not found (weird), fall through to normal MCTS
-            }
-        }
-
         let start_turn = game.state.settings.turn;
         let mut root = ZeroNode::new(1.0, None);
         self.expand_node_single(&mut root, game, false);
@@ -296,31 +238,6 @@ impl<'a> ZeroMctsAgent<'a> {
     ) -> (Option<Box<dyn Move>>, Vec<crate::ai::mcts_types::MoveVisit>) {
         use crate::ai::mcts_types::MoveVisit;
 
-        // 1. Check Opening Book
-        use crate::ai::book::Book;
-        use rand::seq::SliceRandom;
-
-        let mut book_moves = Book::recommend(game);
-        if !book_moves.is_empty() {
-            let mut rng = self.rng.borrow_mut();
-            book_moves.shuffle(&mut *rng);
-            if let Some(selected_move) = book_moves.pop() {
-                // Create MoveVisit for this move with 100% probability (iterations count)
-                let move_info = MoveVisit {
-                    move_type: selected_move.move_type(),
-                    visits: self.iterations as f32,
-                    source_idx: selected_move.source_idx().ok(),
-                    target_idx: selected_move.target_idx().ok(),
-                    structure_type: selected_move.structure_type().ok(),
-                    unit_type: selected_move.unit_type().ok(),
-                    tech_type: selected_move.tech_type().ok(),
-                    ability_type: selected_move.ability_type().ok(),
-                    reward_type: selected_move.reward_type().ok(),
-                };
-                return (Some(selected_move), vec![move_info]);
-            }
-        }
-
         let start_turn = game.state.settings.turn;
         let mut root = ZeroNode::new(1.0, None);
         self.expand_node_single(&mut root, game, false);
@@ -339,9 +256,13 @@ impl<'a> ZeroMctsAgent<'a> {
                 .collect();
             let sum: f32 = noise.iter().sum();
             if sum > 0.0 {
-                for n in &mut noise { *n /= sum; }
+                for n in &mut noise {
+                    *n /= sum;
+                }
             } else {
-                for n in &mut noise { *n = 1.0 / root.children.len() as f32; }
+                for n in &mut noise {
+                    *n = 1.0 / root.children.len() as f32;
+                }
             }
 
             for (child, n) in root.children.iter_mut().zip(noise.iter()) {
@@ -384,7 +305,8 @@ impl<'a> ZeroMctsAgent<'a> {
             }
         }
 
-        // in early game, sample proportional to visit counts instead of argmax
+        // Early-game visit sampling instead of argmax; dead while the threshold is 0.
+        #[allow(clippy::absurd_extreme_comparisons)]
         if move_count < Self::TEMPERATURE_MOVE_THRESHOLD && root.children.len() > 1 {
             use rand::distr::{Distribution, weighted::WeightedIndex};
             let weights: Vec<f32> = root.children.iter().map(|c| c.visits.max(0.0)).collect();
@@ -500,7 +422,9 @@ impl<'a> ZeroMctsAgent<'a> {
         let current = root;
         current.add_virtual_loss(self.virtual_loss);
 
-        // First iteration (root → first child) with direct reference
+        // First iteration (root → first child) with direct reference.
+        // Loop-as-block: every arm breaks, ending the borrow of `current` before index traversal.
+        #[allow(clippy::never_loop)]
         let leaf_result = loop {
             // Terminal check - separate from horizon
             if game.state.settings._game_over {

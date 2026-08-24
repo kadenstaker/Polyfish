@@ -69,7 +69,10 @@ fn add_missing_fields(root: &mut Value, map_size: i32) {
         ("gameId", serde_json::json!("")),
         ("gameName", serde_json::json!("")),
         ("seed", serde_json::json!(0)),
-        ("version", serde_json::json!(0)),
+        (
+            "version",
+            serde_json::json!(polyfish::version_sync::GameVersion::Legacy as i32),
+        ),
         ("mapType", serde_json::json!(0)),
         ("winByCapital", serde_json::json!(true)),
         ("winByExtermination", serde_json::json!(true)),

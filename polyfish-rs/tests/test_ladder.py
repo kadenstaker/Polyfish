@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -105,6 +106,44 @@ class RequiredGamesTest(unittest.TestCase):
         # Should not raise on a baseline the search can actually produce.
         self.assertIsNotNone(self.ladder.required_games(0.0, 0.05))
         self.assertIsNotNone(self.ladder.required_games(1.0, -0.05))
+
+    def test_the_unpaired_figure_is_unchanged_by_the_rho_argument(self):
+        # Default rho=0 must leave the number every registered bar was sized
+        # against bit-identical.
+        self.assertEqual(self.ladder.required_games(0.33, 0.08),
+                         self.ladder.required_games(0.33, 0.08, rho=0.0))
+
+    def test_a_cancelling_swap_buys_games_back(self):
+        # rho is the correlation the side swap leaves behind, so the evidence
+        # costs (1 + rho) x the games: rho = -0.4 is 60% of the unpaired bill.
+        unpaired = self.ladder.required_games(0.33, 0.08)
+        self.assertEqual(self.ladder.required_games(0.33, 0.08, rho=-0.4),
+                         math.ceil(unpaired * 0.6))
+        self.assertGreater(self.ladder.required_games(0.33, 0.08, rho=0.4), unpaired)
+
+
+class StudentTTest(unittest.TestCase):
+    """The paired interval is built from a sample variance, so it needs a t
+    quantile; at the ~32 pairs a reading holds, z is ~4% too narrow."""
+
+    def setUp(self):
+        import ladder
+
+        self.ladder = ladder
+
+    def test_matches_reference_quantiles(self):
+        # Cornish-Fisher is good to ~1e-3 from df=4 up; below that the interval
+        # is dominated by the sample being two pairs wide anyway.
+        for df, expected in ((4, 2.776445), (10, 2.228139), (31, 2.039513),
+                             (120, 1.979930)):
+            self.assertAlmostEqual(self.ladder._t_quantile(0.025, df), expected, delta=1e-3)
+
+    def test_converges_down_to_the_normal(self):
+        z = self.ladder._z_from_tail(0.025)
+        wide = [self.ladder._t_quantile(0.025, df) for df in (4, 16, 64, 4096)]
+        self.assertEqual(wide, sorted(wide, reverse=True))
+        self.assertGreater(wide[-1], z)
+        self.assertAlmostEqual(wide[-1], z, delta=1e-3)
 
 
 class WinRateTest(unittest.TestCase):
@@ -405,6 +444,244 @@ class VerdictTest(unittest.TestCase):
         pooled_wr, pooled_n = self.ladder._pool(self._series(*([20] * 8)))
         pooled = self.ladder._wilson(pooled_wr, pooled_n)
         self.assertLess(pooled[1] - pooled[0], one[1] - one[0])
+
+
+class PairedReadingTest(unittest.TestCase):
+    """Audit M3 option 2: the seeded map set is played twice per seed with the
+    sides swapped, so the seed is the unit of evidence and the map's gift to a
+    seat cancels inside the pair. Nothing computed that, even though arena has
+    been writing the per-game records it needs all along."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["LADDER_FILE"] = os.path.join(self.tmp.name, "ladder.json")
+        sys.modules.pop("ladder", None)
+        import ladder
+
+        self.ladder = ladder
+        self.dump = os.path.join(self.tmp.name, "gauge_stats")
+        os.makedirs(self.dump)
+        self.idx = 0
+
+    def tearDown(self):
+        del os.environ["LADDER_FILE"]
+        sys.modules.pop("ladder", None)
+        self.tmp.cleanup()
+
+    def _game(self, seed, swap, winner, dropped=False):
+        """One arena --dump-stats-dir record, in arena's own shape."""
+        doc = {
+            "seed": seed,
+            "swap": swap,
+            "config1_seat": 2 if swap else 1,
+            "config2_seat": 1 if swap else 2,
+            "dropped": dropped,
+            "samples": [],
+        }
+        if not dropped:
+            doc["winner_config"] = winner
+            doc["turns"] = 30
+        stem = "dropped" if dropped else "game"
+        with open(os.path.join(self.dump, f"{stem}_{self.idx:05}.json"), "w") as f:
+            json.dump(doc, f)
+        self.idx += 1
+
+    def _pair(self, seed, first, second):
+        self._game(seed, False, first)
+        self._game(seed, True, second)
+
+    def test_a_seed_the_model_swept_scores_one(self):
+        self._pair(1, 1, 1)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertEqual(out["pairs"], 1)
+        self.assertEqual(out["model_sweeps"], 1)
+        self.assertEqual(out["paired_win_rate"], 1.0)
+
+    def test_a_split_seed_scores_a_half(self):
+        self._pair(1, 1, 2)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertEqual(out["splits"], 1)
+        self.assertEqual(out["paired_win_rate"], 0.5)
+        self.assertEqual(out["paired_diff"], 0.0)
+
+    def test_an_anchor_sweep_scores_zero_and_a_draw_scores_a_half(self):
+        self._pair(1, 2, 2)
+        self._pair(2, 0, 0)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertEqual(out["opp_sweeps"], 1)
+        self.assertEqual(out["splits"], 1)
+        self.assertEqual(out["paired_win_rate"], 0.25)
+
+    def test_a_seed_that_lost_half_its_swap_is_not_a_pair(self):
+        """A dropped game unbalances the swap; counting the survivor as a pair
+        would put the seat advantage straight back into the estimate."""
+        self._pair(1, 1, 2)
+        self._game(2, False, 1)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertEqual(out["pairs"], 1)
+        self.assertEqual(out["unpaired_seeds"], 1)
+        self.assertEqual(out["games"], 2)
+
+    def test_dropped_games_are_never_read(self):
+        self._pair(1, 1, 2)
+        self._game(2, False, 1, dropped=True)
+        self._game(2, True, 1, dropped=True)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertEqual(out["pairs"], 1)
+        self.assertEqual(out["unpaired_seeds"], 0)
+
+    def test_an_empty_dump_is_none_not_a_crash(self):
+        self.assertIsNone(self.ladder._paired_from_stats(self.dump))
+        self.assertIsNone(
+            self.ladder._paired_from_stats(os.path.join(self.tmp.name, "nope"))
+        )
+
+    def test_a_swap_that_cancels_map_bias_reads_tighter_than_the_same_games_unpaired(self):
+        """The whole point of the seeded design. Half the maps favour the seat
+        the model starts on and half the other, and the swap cancels it — so
+        the per-seed spread is smaller than the binomial the unpaired interval
+        assumes, and the reading resolves finer on identical games."""
+        for seed in range(24):
+            if seed % 3:
+                self._pair(seed, 1, 2)
+            else:
+                self._pair(seed, 2, 2)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertLess(out["paired_resolves_pp"], out["unpaired_resolves_pp"])
+        self.assertLess(out["rho"], 0.0)
+        self.assertLess(out["variance_ratio"], 1.0)
+        self.assertLess(out["games_needed"],
+                        self.ladder.required_games(out["paired_win_rate"],
+                                                   self.ladder.MIN_DETECTABLE_EFFECT))
+
+    def test_a_map_set_the_model_sweeps_or_loses_reads_wider_and_says_so(self):
+        """The honest other half: when a seed's two halves agree, rho is
+        positive and the pairing buys nothing — the unpaired interval is the
+        overconfident one there (it assumes 2n independent trials it does not
+        have). The reading must widen and say so, not sell the seeded design
+        as free precision."""
+        for seed in range(24):
+            if seed % 3:
+                self._pair(seed, 2, 2)
+            else:
+                self._pair(seed, 1, 1)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertGreater(out["rho"], 0.0)
+        self.assertGreater(out["paired_resolves_pp"], out["unpaired_resolves_pp"])
+
+    def test_a_perfectly_cancelling_swap_is_not_reported_as_certainty(self):
+        """Every seed splits, so the sample variance is zero. A zero-width
+        interval would say the model wins exactly half with no doubt left."""
+        for seed in range(32):
+            self._pair(seed, 1, 2)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertEqual(out["paired_win_rate"], 0.5)
+        self.assertGreater(out["paired_resolves_pp"], 0.0)
+        self.assertLess(out["paired_resolves_pp"], out["unpaired_resolves_pp"])
+        self.assertLess(out["paired_ci"][0], 0.5)
+        self.assertGreater(out["paired_ci"][1], 0.5)
+
+    def test_the_point_estimate_matches_the_unpaired_one_on_the_same_games(self):
+        """Pairing is a variance argument, not a different answer: on a
+        complete map set the two estimates are the same number."""
+        wins = 0
+        for seed in range(16):
+            first, second = (1, 2) if seed % 2 else (2, 2)
+            wins += (first == 1) + (second == 1)
+            self._pair(seed, first, second)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertAlmostEqual(out["paired_win_rate"], wins / 32.0, places=6)
+
+    def test_the_difference_is_the_win_rate_on_a_minus_one_to_one_scale(self):
+        for seed in range(8):
+            self._pair(seed, 1, 2 if seed else 1)
+        out = self.ladder._paired_from_stats(self.dump)
+        self.assertAlmostEqual(out["paired_diff"], 2.0 * out["paired_win_rate"] - 1.0,
+                               places=4)
+        self.assertAlmostEqual(out["paired_diff_ci"][0], 2.0 * out["paired_ci"][0] - 1.0,
+                               places=3)
+        self.assertAlmostEqual(out["paired_diff_ci"][1], 2.0 * out["paired_ci"][1] - 1.0,
+                               places=3)
+
+    def _args(self, stats_dir):
+        class Args:
+            pass
+
+        a = Args()
+        a.run_id, a.iteration = "t", 1
+        a.wins, a.losses, a.draws = 20, 44, 0
+        a.avg_score_model = a.avg_score_opponent = 0.0
+        a.mcts, a.gumbel_k, a.eval_backend = 64, 16, "candle"
+        a.max_turns = 45
+        a.wins_p1 = a.wins_p2 = None
+        a.tribes = "Imperius,Imperius"
+        a.kind, a.opponent = "gauge", None
+        a.stats_dir = stats_dir
+        return a
+
+    def test_a_reading_with_a_dump_carries_the_paired_record(self):
+        for seed in range(8):
+            self._pair(seed, 1, 2)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.ladder.cmd_record(self._args(self.dump))
+        verdict = json.loads(buf.getvalue())
+        with open(os.environ["LADDER_FILE"]) as f:
+            reading = json.load(f)["readings"][-1]
+        self.assertEqual(reading["paired"]["pairs"], 8)
+        self.assertEqual(verdict["paired_win_rate"], 0.5)
+        self.assertIn("paired_ci", verdict)
+        self.assertIn("paired_rho", verdict)
+
+    def test_the_paired_record_does_not_move_the_unpaired_reading(self):
+        """It is recorded evidence, not an input: both verdicts are registered
+        rules on the unpaired counts (EXP 11), so a dump must not touch them."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.ladder.cmd_record(self._args(None))
+        without = json.loads(buf.getvalue())
+        for seed in range(8):
+            self._pair(seed, 1, 1)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.ladder.cmd_record(self._args(self.dump))
+        with_dump = json.loads(buf.getvalue())
+        for key in ("action", "win_rate", "win_rate_ci", "resolves_pp", "elo_est",
+                    "elo_ci", "plateau_strikes"):
+            self.assertEqual(without[key], with_dump[key], key)
+
+    def test_a_dumpless_reading_carries_no_paired_key(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.ladder.cmd_record(self._args(None))
+        with open(os.environ["LADDER_FILE"]) as f:
+            self.assertNotIn("paired", json.load(f)["readings"][-1])
+
+    def test_the_cli_re_reads_a_retained_dump(self):
+        """The dumps outlive the match, so a past reading can be re-analysed
+        without replaying it."""
+        import subprocess
+
+        for seed in range(8):
+            self._pair(seed, 1, 2)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run(
+            [sys.executable, os.path.join(root, "ladder.py"), "paired",
+             "--stats-dir", self.dump],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(json.loads(out.stdout)["pairs"], 8)
+
+    def test_the_cli_fails_loudly_on_a_dump_with_no_pairs(self):
+        import subprocess
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run(
+            [sys.executable, os.path.join(root, "ladder.py"), "paired",
+             "--stats-dir", self.dump],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(out.returncode, 0)
 
 
 class TribeScopeTest(unittest.TestCase):
@@ -746,6 +1023,59 @@ class PowerCommandTest(unittest.TestCase):
         self.assertEqual(d["at_games"], 64)
         self.assertGreater(d["games_per_reading"], d["at_games"])
         self.assertAlmostEqual(d["resolves_pp"], 11.23, places=2)
+
+
+class EnvContractTest(unittest.TestCase):
+    """Every env var ladder.py reads must be exported by a shell driver or be a
+    declared hand-set knob. The mirror of test_train.py's EnvContractTest for
+    the other half of the pipeline: nothing tied the names together, so renaming
+    GAUGE_FREEZE_WR would have restored the production 0.80 bar inside the smoke
+    and failed on a confusing verdict instead of a named error (#48)."""
+
+    # Hand-set for an off-default run; no driver exports them. Adding a name
+    # here is a claim that ladder.py's default is the production behaviour.
+    OPTIONAL = {
+        "LADDER_FILE",
+        "GAUGE_MIN_EFFECT",
+    }
+
+    DRIVERS = ("run_training_loop.sh", "scripts/smoke_train_loop.sh")
+
+    @staticmethod
+    def _read(path):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, path)) as f:
+            return f.read()
+
+    def _exports(self):
+        exports = set()
+        for driver in self.DRIVERS:
+            exports |= set(re.findall(r'^\s*export ([A-Z0-9_]+)=', self._read(driver), re.M))
+        return exports
+
+    def _reads(self):
+        return set(
+            re.findall(r'os\.environ(?:\.get\(|\[)\s*"([A-Z0-9_]+)"', self._read("ladder.py"))
+        )
+
+    def test_every_env_read_is_exported_or_declared_optional(self):
+        reads = self._reads()
+        self.assertTrue(reads, "no os.environ reads found in ladder.py — regex rotted?")
+        unaccounted = reads - self._exports() - self.OPTIONAL
+        self.assertEqual(
+            unaccounted, set(),
+            f"ladder.py reads {sorted(unaccounted)} but no shell driver exports them and they "
+            "are not on the hand-set allowlist. Export from a driver or add to "
+            "EnvContractTest.OPTIONAL.",
+        )
+
+    def test_the_smoke_still_exports_the_freeze_bar(self):
+        """GAUGE_FREEZE_WR is the only thing that reaches the anchor-freeze
+        branch, which runs nowhere but the loop and the smoke."""
+        self.assertIn("GAUGE_FREEZE_WR", self._reads())
+        smoke = set(re.findall(r'^\s*export ([A-Z0-9_]+)=',
+                               self._read("scripts/smoke_train_loop.sh"), re.M))
+        self.assertIn("GAUGE_FREEZE_WR", smoke)
 
 
 if __name__ == "__main__":

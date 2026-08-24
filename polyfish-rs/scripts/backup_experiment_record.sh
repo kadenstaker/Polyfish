@@ -46,7 +46,10 @@ if [ ! -d "$SRC" ]; then
     exit 1
 fi
 
-ITEMS="training_log.csv ladder.json moves_by_turn.json .anchor_state.json .anchor_decay_start checkpoints ${POLYFISH_BACKUP_EXTRA:-}"
+# .current_run exists only while a run is in flight, so a mid-run snapshot
+# carries the id of the run it was taken during. POLYFISH_BACKUP_EXTRA is the
+# extension point for anything else a particular campaign needs kept.
+ITEMS="training_log.csv ladder.json moves_by_turn.json .current_run .anchor_state.json .anchor_decay_start checkpoints ${POLYFISH_BACKUP_EXTRA:-}"
 
 if command -v sha256sum >/dev/null 2>&1; then
     SUM_CMD=(sha256sum)
@@ -207,7 +210,11 @@ for rel in $ITEMS; do
         FOUND=$((FOUND + 1))
         copy_file "$rel" "$src" "$STAGE/$rel" || { echo "copy failed: $rel" >&2; exit 1; }
     elif [ -d "$src" ]; then
-        FOUND=$((FOUND + 1))
+        # An empty dir is not a record: counting it would publish a 0-file
+        # snapshot, advance LATEST onto it and call it complete.
+        if [ -n "$(find "$src" -type f -print -quit 2>/dev/null)" ]; then
+            FOUND=$((FOUND + 1))
+        fi
         copy_dir "$rel" "$src" "$STAGE/$rel" || { echo "copy failed: $rel" >&2; exit 1; }
     else
         printf 'item\t%s\tmissing\t0\tnot_present\n' "$rel" >> "$ITEM_LOG"

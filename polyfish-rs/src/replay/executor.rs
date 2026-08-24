@@ -100,6 +100,7 @@ impl ReplayExecutor {
             return Err(ReplayError::IllegalCommand {
                 context: context.clone(),
                 command: command.clone(),
+                game_version: game.state.settings.version,
                 legal_move_summaries: legal_moves
                     .iter()
                     .take(40)
@@ -107,10 +108,16 @@ impl ReplayExecutor {
                     .collect(),
             });
         }
-        if matches.len() > 1 {
+        // Movegen emits the same move twice when a tile sits inside two of the
+        // player's city territories, and identical candidates carry nothing to
+        // disambiguate. Only genuinely distinct matches are ambiguous; `Debug`
+        // is the identity, so it also separates the concrete move types that
+        // share a `MoveType` (Summon vs Upgrade).
+        if matches.len() > 1 && !all_indistinguishable(&legal_moves, &matches) {
             return Err(ReplayError::AmbiguousCommand {
                 context: context.clone(),
                 command: command.clone(),
+                game_version: game.state.settings.version,
                 matching_move_summaries: matches
                     .iter()
                     .map(|&i| {
@@ -159,6 +166,14 @@ impl ReplayExecutor {
         game.state._messages.clear();
         observer.after_move(game, context, command)
     }
+}
+
+/// Whether every matched legal move is the same move repeated.
+pub(crate) fn all_indistinguishable(legal_moves: &[Box<dyn Move>], matches: &[usize]) -> bool {
+    let first = format!("{:?}", legal_moves[matches[0]]);
+    matches[1..]
+        .iter()
+        .all(|&i| format!("{:?}", legal_moves[i]) == first)
 }
 
 pub(crate) fn matching_move_indices(

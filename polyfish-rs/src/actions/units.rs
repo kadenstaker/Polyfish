@@ -8,6 +8,7 @@ use crate::functions::*;
 use crate::settings::{get_unit_setting, has_skill};
 use crate::states::*;
 use crate::types::*;
+use crate::version_sync::{GameVersion, is_before};
 
 /// Remove a unit from the game
 ///
@@ -124,8 +125,8 @@ pub fn remove_unit(
                     let old_max_hp = crate::functions::get_unit_max_health(child);
                     let mut damage = old_max_hp - child.health;
 
-                    // Versions < 115 had a bug where damage was not inherited
-                    if state.settings.version < 115 {
+                    // Versions before the Cymanti rework did not inherit damage
+                    if is_before(state.settings.version, GameVersion::CymantiRework) {
                         damage = 0.0;
                     }
 
@@ -318,10 +319,10 @@ pub fn step_unit(
             unit.coords.set_at(to_tile_idx, map_size);
 
             // Version-dependent exhaustion logic:
-            // - Before v115: All involuntary moves (pushes) do not exhaust the unit.
-            // - v115 and later: Only units with Skate skill avoid exhaustion when pushed.
+            // - Before the Cymanti rework: involuntary moves (pushes) never exhaust.
+            // - From it on: only units with Skate avoid exhaustion when pushed.
             // dev: idek, adventure-of-assha_1774823883 crashes because of it. this fixes it.
-            let exhaust = if state.settings.version < 115 {
+            let exhaust = if is_before(state.settings.version, GameVersion::CymantiRework) {
                 !involuntary
             } else {
                 !involuntary || !has_skill(unit.unit_type, SkillType::Skate)
@@ -493,11 +494,7 @@ pub fn step_unit(
                 };
 
                 if state.settings._are_you_sure && stomp_damage > 0.0 {
-                    undos.push(crate::memory::note_attacked(
-                        state,
-                        adj_owner,
-                        adj_tile_idx,
-                    ));
+                    undos.push(crate::memory::note_attacked(state, adj_owner, adj_tile_idx));
                 }
 
                 if stomp_damage > 0.0 {
@@ -1114,11 +1111,7 @@ pub fn attack_unit(
                 if let Some(adj_unit_idx) = current_adj_unit_idx {
                     // Fog memory: splashed unit remembers being hit here.
                     if state.settings._are_you_sure && individual_splash_damage > 0.0 {
-                        undos.push(crate::memory::note_attacked(
-                            state,
-                            adj_owner,
-                            adj_idx,
-                        ));
+                        undos.push(crate::memory::note_attacked(state, adj_owner, adj_idx));
                     }
 
                     // Apply Damage
@@ -1402,18 +1395,12 @@ pub fn attack_unit(
 
         // Apply freeze effect if attacker has Freeze skill
         if atk_skills.contains(&SkillType::Freeze) {
-            if let Some(tribe) = state.tribes.get_mut(&defender_owner) {
-                if let Some(unit) = tribe.units.get_mut(defender_idx) {
-                    unit.effects.insert(UnitEffect::Frozen);
-                }
-            }
-            undos.push(Box::new(move |s| {
-                if let Some(tribe) = s.tribes.get_mut(&defender_owner) {
-                    if let Some(unit) = tribe.units.get_mut(defender_idx) {
-                        unit.effects.remove(&UnitEffect::Frozen);
-                    }
-                }
-            }));
+            undos.push(crate::actions::try_add_effect(
+                state,
+                defender_owner,
+                defender_idx,
+                UnitEffect::Frozen,
+            ));
         }
     }
 

@@ -11,13 +11,15 @@ Two sources, same fit:
   --source ladder   ladder.json's readings, anchor `greedy` (its Elo-0 floor).
 The ladder source replaces run_training_loop.sh's chained per-reading win rates
 with one joint fit over every gauge, audit and link match ever recorded, with
-bootstrap intervals. `tribe_audit` readings are excluded (EXCLUDED_KINDS): they
+bootstrap intervals. The loop refits it after every reading into
+elo_ratings.json, which /api/elo-ladder serves to the dashboard beside the
+per-reading estimates. `tribe_audit` readings are excluded (EXCLUDED_KINDS): they
 replay the gauge match on another tribe pair, so pooling them would fold the
 block effect the pinned pair exists to remove back into the rating. Ladder rows
 carry no elimination flag, so finish% is 0 there.
 
 Usage:
-  python3 elo.py fit    [--source ladder] [--ladder ladder.json]
+  python3 elo.py fit    [--source ladder] [--ladder ladder.json] [--quiet]
   python3 elo.py fit    [--matches matches.jsonl] [--out elo_ratings.json]
   python3 elo.py report [--ratings elo_ratings.json]
 """
@@ -77,10 +79,32 @@ def load_games(path: str) -> list[tuple[str, str, float, bool]]:
     return games
 
 
+# A ladder rating is a function of (weights x sims x turn cap), so a reading
+# taken at 16 sims and one at 64 do not measure the same player; chaining them
+# through one node charges a search or curriculum change to the weights (audit
+# M5). Readings fork on the same three fields ladder.py's plateau window keys
+# on. `link` readings are exempt: a link match is what gives a frozen anchor its
+# identity, and tagging it would strand every later reading taken at another
+# budget in its own disconnected component. Anchor nodes therefore pool across
+# budgets, which is the same assumption ladder.py makes storing one elo per
+# anchor. Legacy readings carry no budget and keep their bare name.
+BUDGET_FIELDS = ("mcts", "gumbel_k", "max_turns")
+
+
+def _budget_tag(reading: dict) -> str:
+    budget = reading.get("budget")
+    if not budget or reading.get("kind") == "link":
+        return ""
+    fields = ("-" if budget.get(f) is None else budget[f] for f in BUDGET_FIELDS)
+    return "#m{}k{}t{}".format(*fields)
+
+
 def _ladder_node(reading: dict) -> str:
-    """run_id-qualified player name; bare `model@iterN` collides across runs."""
+    """run_id-qualified player name; bare `model@iterN` collides across runs.
+    Suffixed with the search budget the reading was taken at (BUDGET_FIELDS)."""
     run, model = reading.get("run_id") or "", reading.get("model") or ""
-    return f"{run}/{model}" if run else model
+    base = f"{run}/{model}" if run else model
+    return f"{base}{_budget_tag(reading)}" if base else base
 
 
 # Cross-check readings, not rating evidence: a tribe_audit replays the gauge
@@ -121,6 +145,32 @@ def load_ladder_games(path: str) -> list[tuple[str, str, float, bool]]:
         ):
             games.extend((model, opponent, score, False) for _ in range(int(count)))
     return games
+
+
+def ladder_node_meta(path: str) -> dict[str, dict]:
+    """Which reading each node came from, so a consumer can place the fit on a
+    campaign without re-deriving the node-naming rule in its own language."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    meta: dict[str, dict] = {}
+    for r in data.get("readings", []):
+        if r.get("kind") in EXCLUDED_KINDS:
+            continue
+        meta.setdefault(
+            _ladder_node(r), {"run_id": r.get("run_id"), "iteration": r.get("iteration")}
+        )
+    return meta
+
+
+def latest_ladder_node(path: str) -> str | None:
+    """The node the newest rating-bearing reading measured: the one line of the
+    joint fit worth echoing into the training log."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    for r in reversed(data.get("readings", [])):
+        if r.get("kind") not in EXCLUDED_KINDS:
+            return _ladder_node(r)
+    return None
 
 
 def _pair_stats(
@@ -283,8 +333,11 @@ def cmd_fit(args: argparse.Namespace) -> None:
         if not os.path.exists(args.ladder):
             sys.exit(f"no ladder at {args.ladder} — run a gauge match first")
         games = load_ladder_games(args.ladder)
+        focus = latest_ladder_node(args.ladder)
+        meta = ladder_node_meta(args.ladder)
         source = args.ladder
     else:
+        focus, meta = None, {}
         anchor = args.anchor or ANCHOR
         if not os.path.exists(args.matches):
             sys.exit(f"no ledger at {args.matches} — run arena with --json-out first")
@@ -295,6 +348,16 @@ def cmd_fit(args: argparse.Namespace) -> None:
     bt_games = [(a, b, s) for a, b, s, _ in games]
 
     players = {p for a, b, _ in bt_games for p in (a, b)}
+    budgets = {p.partition("#")[2] for p in players} - {""}
+    if args.source == "ladder" and len(budgets) > 1:
+        newest = (focus or "").partition("#")[2] or "unknown"
+        print(
+            f"note: this ladder spans {len(budgets)} search budgets (newest {newest}); "
+            "readings taken at different budgets are separate players here, linked only "
+            "through the anchors they share, whose own rating pools every budget they "
+            "were played at",
+            file=sys.stderr,
+        )
     if anchor not in players:
         print(
             f"warning: anchor '{anchor}' has no games — the scale floats "
@@ -327,6 +390,7 @@ def cmd_fit(args: argparse.Namespace) -> None:
     out: dict[str, dict] = {}
     for p in sorted(players):
         w = rec[p]
+        budget = p.partition("#")[2]
         out[p] = {
             "elo": round(point[p], 1),
             "ci95": [round(v, 1) for v in ci.get(p, (point[p], point[p]))],
@@ -336,9 +400,19 @@ def cmd_fit(args: argparse.Namespace) -> None:
             "losses": w["losses"],
             "decisive_wins": w["decisive_wins"],
         }
+        if budget:
+            out[p]["budget"] = budget
+        out[p].update({k: v for k, v in meta.get(p, {}).items() if v is not None})
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
-    print(f"{len(games)} games, {len(players)} players -> {args.out}\n")
+    line = f"{len(games)} games, {len(players)} players -> {args.out}"
+    if focus in out:
+        lo, hi = out[focus]["ci95"]
+        line = f"{focus} {out[focus]['elo']:.0f} [{lo:.0f}, {hi:.0f}] | {line}"
+    if args.quiet:
+        print(line)
+        return
+    print(line + "\n")
     print_table(out, anchor)
 
 
@@ -368,6 +442,11 @@ def main() -> None:
         type=int,
         default=BOOTSTRAP_REPS,
         help="bootstrap resamples for the 95%% CI (0 disables)",
+    )
+    p_fit.add_argument(
+        "--quiet",
+        action="store_true",
+        help="one summary line instead of the full table (the training loop's use)",
     )
     p_fit.add_argument(
         "--virtual-draws",

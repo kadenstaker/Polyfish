@@ -13,11 +13,11 @@ An `AI NN` + MCTS `Rust` capable of playing the award winning `Polytopia` strate
 ## Quick Start
 
 1. Install **Rust**, **Node**, and **Python 3**.
-2. Build the frontend once: `cd polyfish-ui && npm install && npm run build` (the server serves `polyfish-ui/dist`).
+2. *(optional)* Build the React SPA: `cd polyfish-ui && npm install && npm run build` — needs Node ≥20.19 (vite 8). The simulator and the training dashboard are plain static files under `src/public` and need no build.
 3. Run `./run-server.sh` (frees port 3000, then runs the `polyfish` binary from `polyfish-rs/`).
-4. Open `http://localhost:3000` for the simulator, `http://localhost:3000/simulator/training.html` for the training dashboard.
+4. Open `http://localhost:3000/simulator/index.html` for the simulator and `http://localhost:3000/training.html` for the training dashboard. `http://localhost:3000` is the React SPA once built, and falls back to the static simulator otherwise.
 
-On startup the server loads `polyfish-rs/live_game.json`, then `saved_state.json`, then the newest `replays/mod_replay_*.json`, before falling back to a generated map.
+On startup the server loads `polyfish-rs/live_game.json`, then `saved_state.json`, then the newest canonical `replays/*.replay.json`, before falling back to a generated map. Pre-canonical mod captures are converted on the way in by `/replay/save`, or offline with `import_replays convert-legacy`.
 
 ## Open Work
 
@@ -36,12 +36,14 @@ The one perennial item: training the network well still needs monster compute.
 - **`polyfish-rs/run_training_loop.sh`**: The driver — `init_model.py` → `self_play` (Rust, writes `games_*.safetensors`) → `train.py` (PyTorch, updates `model.safetensors`) → log a row and checkpoint, plus a strength-gauge arena match every few iterations.
 - **`polyfish-rs/train.py`**: The PyTorch trainer. Its network definition must stay byte-compatible with `polyfish-rs/src/ai/network.rs` — both read and write the same `model.safetensors`.
 - Head-to-head evaluation: `cargo run --release --bin arena -- --model1 a.safetensors --model2 b.safetensors --games 32 --mcts 64` (each seed is played twice with sides swapped).
+- **Windows**: train under WSL2 with `polyfish-rs/run_training_loop.sh`. The PowerShell chain (`run_training_loop.ps1`, `run-training.bat`, `auto_train.ps1`, `start-hidden.vbs`) was deleted because it trained with no strength gauge, no anchor freeze and no plateau stop; git history has it. `run-server.bat` is unaffected and still launches the server.
+- **`auto_train.sh`** (repo root, Linux/GNOME only): idle babysitter that runs the loop with `--resume` while the desktop is idle and halts the whole process group when it is not.
 
 ## Core Modules
 
 - **`polyfish-rs/`**: The Rust game engine, AI, web backend, and every training binary. Almost all work happens here.
-- **`polyfish-ui/`**: Vite/React frontend. The Rust server serves its `dist/` build, including the forked static UI under `public/simulator/`.
-- **`src/public/`**: The original static Web UI (JS/HTML/CSS) the `polyfish-ui/public/simulator/` fork came from. Not mounted by the server, but ahead of the fork in places (its `training.html` has the Elo-ladder chart) — check which copy you are editing.
+- **`polyfish-ui/`**: Vite/React frontend. The Rust server serves its `dist/` build at `/`, `/assets` and `/static`; `dist/` is gitignored, so build it before you expect the SPA.
+- **`src/public/`**: The static Web UI (JS/HTML/CSS) — the simulator and the training dashboard, and the only copy of either. The server mounts it at `/simulator/*` and as the fallback for `/`; `polyfish-ui` iframes `/simulator/index.html` and `/simulator/training.html` rather than keeping a fork.
 - **`polyfish-mod/`**: C# BepInEx/PolyMod mod that auto-plays replays inside the real Steam game and POSTs captured states to the local server.
 - **`polyfish-scraper/`**: Utilities for gathering game data and assets.
 - **`CLAUDE.md`**: The per-file map of the tree, including the traps. The deep reference this README summarises.
@@ -50,13 +52,13 @@ The one perennial item: training the network well still needs monster compute.
 ## AI Architecture
 
 - **`polyfish-rs/src/ai/gumbel_mcts.rs`**: Gumbel Alpha-Zero search — the one self-play training actually runs.
-- **`polyfish-rs/src/ai/mcts_zero.rs`**: The PUCT Alpha-Zero MCTS (`mcts.rs` and `original_mcts_zero.rs` are older implementations kept for comparison).
+- **`polyfish-rs/src/ai/mcts_zero.rs`**: The PUCT Alpha-Zero MCTS (`original_mcts_zero.rs` is an older implementation kept for comparison; the unused `mcts.rs` has been deleted).
 - **`polyfish-rs/src/ai/heuristic_mcts.rs`**: Network-free MCTS for UI analysis and the interactive `trainer` binary.
 - **`polyfish-rs/src/ai/network.rs`**: `PolyZeroNet` — candle ResNet trunk plus cross-attention, a decomposed policy, and a value head.
 - **`polyfish-rs/src/ai/mapper.rs`**: Maps moves onto the four policy heads (action type, source, target, option) so the policy is independent of legal-move ordering.
 - **`polyfish-rs/src/ai/features.rs`**: Logic for encoding GameState into NN tensors (11x11 maps).
 - **`polyfish-rs/src/ai/evaluator/`**: Modular logic for Economy, Military, Research, Exploration, and Expansion evaluation.
-- **`polyfish-rs/src/ai/book.rs`**: Opening move library for standardized tribe starts.
+- **`polyfish-rs/src/ai/book.rs`**: Opening move library for standardized tribe starts. Data only — no search agent consults it.
 - **`polyfish-rs/src/bin/`**: The CLI tools — `self_play`, `arena`, `train`, `trainer`, plus benchmarks, replay management, and debug probes.
 
 ## Inference Backends

@@ -1,5 +1,6 @@
 use super::*;
 use crate::ai::features;
+use crate::ai::mapper::NUM_MOVE_OPTIONS;
 use crate::ai::network::NUM_ACTION_TYPES;
 use crate::mapgen::{MapGenSettings, generate};
 use crate::moves::{EndTurnMove, Move};
@@ -215,11 +216,31 @@ fn safetensors_writer_emits_expected_shapes() {
         tensors["spatial_maps"].dims(),
         &[1, features::NUM_CHANNELS * 121]
     );
-    assert_eq!(tensors["player_states"].dims(), &[1, features::RawFeatures::PLAYER_STATE_DIM]);
+    assert_eq!(
+        tensors["player_states"].dims(),
+        &[1, features::RawFeatures::PLAYER_STATE_DIM]
+    );
     assert_eq!(tensors["action_type"].dims(), &[1, NUM_ACTION_TYPES]);
     assert_eq!(tensors["source_spatial"].dims(), &[1, 121]);
     assert_eq!(tensors["target_spatial"].dims(), &[1, 121]);
-    assert_eq!(tensors["move_option"].dims(), &[1, 192]);
+    assert_eq!(tensors["move_option"].dims(), &[1, NUM_MOVE_OPTIONS]);
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(format!("{}.manifest.json", paths[0].display())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["moveOptionDim"].as_u64(),
+        Some(NUM_MOVE_OPTIONS as u64)
+    );
+    assert_eq!(
+        manifest["numActionTypes"].as_u64(),
+        Some(NUM_ACTION_TYPES as u64)
+    );
+    assert_eq!(
+        manifest["derivedResultSourceFiles"],
+        serde_json::json!([]),
+        "a captured result must not be marked as derived"
+    );
     assert_eq!(tensors["progress_mask"].dims(), &[1]);
     assert_eq!(tensors["aux_mask"].dims(), &[1]);
     let action_type = tensors["action_type"].to_vec2::<f32>().unwrap();
@@ -246,4 +267,254 @@ fn safetensors_writer_emits_expected_shapes() {
     std::fs::remove_file(format!("{}.manifest.json", paths[0].display())).unwrap();
     std::fs::remove_file(&paths[0]).unwrap();
     std::fs::remove_dir(&dir).unwrap();
+}
+
+/// Terminal-ish state built by hand: `(id, score, killed)` per tribe.
+/// Mirrors `ai::mcts_common::tests::terminal_game`.
+fn game_with_tribes(tribes: &[(i32, i32, bool)], game_over: bool) -> crate::game::Game {
+    let mut game = crate::game::Game::new();
+    game.state.tribes.clear();
+    for &(id, score, killed) in tribes {
+        game.state.tribes.insert(
+            id,
+            crate::states::TribeState {
+                id,
+                score,
+                killed_turn: if killed { 3 } else { 0 },
+                ..Default::default()
+            },
+        );
+    }
+    game.state.settings._game_over = game_over;
+    game
+}
+
+#[test]
+fn derives_elimination_winner_over_a_dead_score_leader() {
+    let game = game_with_tribes(&[(1, 40, false), (2, 900, true)], true);
+    let result = derive_result(&game).unwrap();
+    assert_eq!(result.winner_player_id, Some(1));
+    assert!(!result.draw);
+    assert_eq!(result.reason.as_deref(), Some("derived:elimination"));
+    assert_eq!(result.scores, BTreeMap::from([(1, 40), (2, 900)]));
+}
+
+#[test]
+fn derives_turn_limit_winner_from_score_among_the_living() {
+    let game = game_with_tribes(&[(1, 100, false), (2, 40, false), (3, 900, true)], true);
+    let result = derive_result(&game).unwrap();
+    assert_eq!(result.winner_player_id, Some(1));
+    assert_eq!(result.reason.as_deref(), Some("derived:scoreAtLimit"));
+}
+
+#[test]
+fn derives_draw_on_mutual_elimination() {
+    let game = game_with_tribes(&[(1, 100, true), (2, 40, true)], true);
+    let result = derive_result(&game).unwrap();
+    assert_eq!(result.winner_player_id, None);
+    assert!(result.draw);
+    assert_eq!(result.reason.as_deref(), Some("derived:mutualElimination"));
+}
+
+#[test]
+fn derives_draw_on_a_score_tie_at_the_turn_limit() {
+    let game = game_with_tribes(&[(1, 40, false), (2, 40, false)], true);
+    let result = derive_result(&game).unwrap();
+    assert_eq!(result.winner_player_id, None);
+    assert!(result.draw);
+    assert_eq!(result.reason.as_deref(), Some("derived:scoreTieAtLimit"));
+}
+
+#[test]
+fn refuses_to_derive_from_a_non_terminal_state() {
+    let game = game_with_tribes(&[(1, 100, false), (2, 40, false)], false);
+    let error = derive_result(&game).unwrap_err().to_string();
+    assert!(
+        error.contains("cannot derive a result"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn finish_derives_a_result_when_the_replay_has_none() {
+    let mut replay = replay_with(vec![ReplayCommand::EndTurn]);
+    replay.turns.push(ReplayTurn {
+        turn_number: replay.initial_state.settings.turn,
+        player_id: 2,
+        commands: vec![ReplayCommand::EndTurn],
+    });
+    assert!(replay.result.is_none());
+    let mut collector = crate::replay::training::TrainingCollector::new(&replay).unwrap();
+    let mut game = ReplayExecutor::execute_with_observer(&replay, &mut collector).unwrap();
+    game.state.tribes.get_mut(&2).unwrap().killed_turn = 3;
+
+    assert_eq!(
+        derive_result(&game).unwrap().reason.as_deref(),
+        Some("derived:elimination")
+    );
+    let samples = collector
+        .finish(&game, None, std::path::Path::new("derived.replay.json"))
+        .unwrap();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].value(), 1.0);
+    assert_eq!(samples[1].value(), -1.0);
+
+    let dir = std::env::temp_dir().join(format!("polyfish-derived-test-{}", std::process::id()));
+    let paths = crate::replay::training::write_training_files(&samples, &dir, 10).unwrap();
+    let manifest_path = format!("{}.manifest.json", paths[0].display());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(
+        manifest["derivedResultSourceFiles"],
+        serde_json::json!(["derived.replay.json"])
+    );
+    std::fs::remove_file(&manifest_path).unwrap();
+    std::fs::remove_file(&paths[0]).unwrap();
+    std::fs::remove_dir(&dir).unwrap();
+}
+
+#[test]
+fn finish_still_refuses_a_result_less_unfinished_replay() {
+    let replay = replay_with(vec![ReplayCommand::EndTurn]);
+    let mut collector = crate::replay::training::TrainingCollector::new(&replay).unwrap();
+    let game = ReplayExecutor::execute_with_observer(&replay, &mut collector).unwrap();
+    let error = match collector.finish(&game, None, std::path::Path::new("truncated.replay.json")) {
+        Ok(samples) => panic!("expected a refusal, got {} samples", samples.len()),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("cannot derive a result"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn reports_the_game_version_and_gates_one_outside_the_supported_range() {
+    let replay = replay_with(vec![ReplayCommand::EndTurn]);
+    let eligibility = validate_training_eligibility(&replay).unwrap();
+    assert_eq!(eligibility.game_version, 115);
+    assert_eq!(eligibility.version_support, VersionSupport::Supported);
+
+    let mut ancient = replay_with(vec![ReplayCommand::EndTurn]);
+    ancient.initial_state.settings.version = MIN_SUPPORTED_GAME_VERSION - 1;
+    let error = validate_training_eligibility(&ancient)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&format!("game version {}", MIN_SUPPORTED_GAME_VERSION - 1))
+            && error.contains(&format!(
+                "{MIN_SUPPORTED_GAME_VERSION}..={MAX_SUPPORTED_GAME_VERSION}"
+            )),
+        "unexpected error: {error}"
+    );
+
+    let mut future = replay_with(vec![ReplayCommand::EndTurn]);
+    future.initial_state.settings.version = MAX_SUPPORTED_GAME_VERSION + 4;
+    assert!(validate_training_eligibility(&future).is_err());
+    assert!(crate::replay::training::TrainingCollector::new(&future).is_err());
+
+    let eligibility = validate_training_eligibility_with(&future, true).unwrap();
+    assert_eq!(eligibility.version_support, VersionSupport::TooNew);
+    assert!(crate::replay::training::TrainingCollector::new_with(&future, true).is_ok());
+}
+
+#[test]
+fn illegal_command_error_carries_the_game_version() {
+    let replay = replay_with(vec![ReplayCommand::Step {
+        source: 0,
+        target: 0,
+    }]);
+    assert!(matches!(
+        ReplayExecutor::execute(&replay).unwrap_err(),
+        ReplayError::IllegalCommand {
+            game_version: 115,
+            ..
+        }
+    ));
+}
+
+/// Reads the checkpoint off the engine's own post-load state, which is what
+/// `before_move` compares against.
+fn checkpoint_for(replay: &Replay, player_id: crate::states::PlayerId) -> SourceCheckpoint {
+    let game = ReplayExecutor::initialize(replay).unwrap();
+    let tribe = &game.state.tribes[&player_id];
+    SourceCheckpoint {
+        turn_number: replay.turns[0].turn_number,
+        player_id,
+        score: tribe.score,
+        stars: tribe.stars,
+        unit_count: tribe.units.len(),
+    }
+}
+
+#[test]
+fn verifier_is_inert_without_diagnostics_and_catches_a_diverged_star_count() {
+    let replay = replay_with(vec![ReplayCommand::EndTurn]);
+    let mut inert = DivergenceVerifier::new(replay.metadata.end_turn_checkpoints().unwrap());
+    assert!(inert.is_inert());
+    ReplayExecutor::execute_with_observer(&replay, &mut inert).unwrap();
+
+    let mut replay = replay_with(vec![ReplayCommand::EndTurn]);
+    let checkpoint = checkpoint_for(&replay, 1);
+    replay.metadata.source_diagnostics = Some(serde_json::json!({
+        "endTurnCheckpoints": [checkpoint],
+        "someUnknownSourceKey": 7,
+    }));
+    let mut verifier = DivergenceVerifier::new(replay.metadata.end_turn_checkpoints().unwrap());
+    assert!(!verifier.is_inert());
+    ReplayExecutor::execute_with_observer(&replay, &mut verifier).unwrap();
+    assert!(verifier.score_notes().is_empty());
+
+    let mut drifted = checkpoint;
+    drifted.score += 5;
+    replay.metadata.source_diagnostics =
+        Some(serde_json::json!({ "endTurnCheckpoints": [drifted] }));
+    let mut verifier = DivergenceVerifier::new(replay.metadata.end_turn_checkpoints().unwrap());
+    ReplayExecutor::execute_with_observer(&replay, &mut verifier).unwrap();
+    assert_eq!(verifier.score_notes().len(), 1);
+
+    let mut drifted = checkpoint;
+    drifted.stars += 1;
+    replay.metadata.source_diagnostics =
+        Some(serde_json::json!({ "endTurnCheckpoints": [drifted] }));
+    let mut verifier = DivergenceVerifier::new(replay.metadata.end_turn_checkpoints().unwrap());
+    let error = ReplayExecutor::execute_with_observer(&replay, &mut verifier).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ReplayError::SourceDivergence {
+                field: "stars",
+                player_id: 1,
+                ..
+            }
+        ),
+        "unexpected error: {error}"
+    );
+    assert!(error.to_string().contains("source recorded"));
+}
+
+#[test]
+fn only_indistinguishable_matches_collapse() {
+    use super::executor::all_indistinguishable;
+    use crate::moves::{HarvestMove, SummonMove, UpgradeMove};
+    use crate::types::UnitType;
+
+    // Movegen walks a tile once per city whose territory contains it, so the
+    // same move can appear twice; that is not an ambiguous command.
+    let moves: Vec<Box<dyn Move>> = vec![
+        Box::new(HarvestMove::new(25)),
+        Box::new(HarvestMove::new(25)),
+        Box::new(HarvestMove::new(26)),
+    ];
+    assert!(all_indistinguishable(&moves, &[0, 1]));
+    assert!(!all_indistinguishable(&moves, &[0, 2]));
+
+    // Summon and Upgrade share MoveType::Summon and serialize identically, so
+    // the collapse must not treat them as the same move.
+    let shared: Vec<Box<dyn Move>> = vec![
+        Box::new(SummonMove::new(4, UnitType::Warrior)),
+        Box::new(UpgradeMove::new(4, UnitType::Warrior)),
+    ];
+    assert_eq!(shared[0].serialize(), shared[1].serialize());
+    assert!(!all_indistinguishable(&shared, &[0, 1]));
 }

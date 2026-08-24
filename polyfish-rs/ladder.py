@@ -6,7 +6,10 @@ Anchors are frozen model files (greedy = Elo 0 floor); the last anchor is
 continue / freeze (>=80% vs active) / stop (plateau, see _plateau).
 Win/loss counts are always from the current model's side. Every reading
 carries a Wilson interval and both verdicts are drawn from it, not from the
-point estimate a ~64-game reading resolves to only +/-12pp.
+point estimate a ~64-game reading resolves to only +/-12pp. A reading that
+dumped per-game stats also carries `paired`: the same games read per seed
+across arena's side swap, which is tighter but steers nothing (see
+_paired_from_stats).
 
 Scope: the gauge is a fixed Imperius-mirror instrument while self-play trains
 on a 5-tribe pool. Pinning the pair is deliberate variance control — the tribe
@@ -134,26 +137,27 @@ def _z_from_tail(tail):
            (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
 
 
-def required_games(baseline, delta, power=0.80, alpha=0.05):
+def required_games(baseline, delta, power=0.80, alpha=0.05, rho=0.0):
     """Games per reading needed to call a `delta` change from `baseline` at
     `power`, two-sided `alpha`, comparing two independent readings.
 
     This is the number M3 asks for: size the budget against the effect you
     actually want to detect, instead of reading a verdict off an interval that
-    was never wide enough to carry one. Unpaired, so it is the conservative
-    figure — a paired analysis over the seeded map set (both readings now run
-    the same seeds) needs fewer, by a factor that depends on how correlated the
-    per-seed outcomes are, which nothing measures yet.
+    was never wide enough to carry one. `rho` is the within-seed correlation the
+    side swap leaves behind, as `_paired_from_stats` measures it off a real
+    reading: the same evidence costs (1 + rho) x the games, so rho < 0 is the
+    pairing paying for itself. Default 0 = the unpaired, conservative figure.
     """
     p0 = min(max(baseline, 1e-6), 1.0 - 1e-6)
     p1 = min(max(baseline + delta, 1e-6), 1.0 - 1e-6)
     if p0 == p1:
         return None
+    deff = max(1.0 + rho, 1e-9)
     z_a = _z_from_tail(alpha / 2.0)
     z_b = _z_from_tail(1.0 - power)
     pbar = (p0 + p1) / 2.0
-    num = z_a * math.sqrt(2.0 * pbar * (1.0 - pbar)) + \
-        z_b * math.sqrt(p0 * (1.0 - p0) + p1 * (1.0 - p1))
+    num = z_a * math.sqrt(2.0 * pbar * (1.0 - pbar) * deff) + \
+        z_b * math.sqrt((p0 * (1.0 - p0) + p1 * (1.0 - p1)) * deff)
     return math.ceil(num * num / ((p1 - p0) ** 2))
 
 
@@ -330,6 +334,99 @@ def _summarize_stats(stats_dir):
     return out
 
 
+def _t_quantile(tail, df):
+    """Student-t upper-tail quantile, Cornish-Fisher expanded off the normal
+    one. The paired interval below is built from a sample variance, and at the
+    ~32 seed pairs a reading holds the normal quantile is already ~4% too
+    narrow — which would report the paired instrument as sharper than it is."""
+    z = _z_from_tail(tail)
+    if df < 1:
+        return z
+    z3, z5, z7, z9 = z ** 3, z ** 5, z ** 7, z ** 9
+    return (z
+            + (z3 + z) / (4.0 * df)
+            + (5.0 * z5 + 16.0 * z3 + 3.0 * z) / (96.0 * df ** 2)
+            + (3.0 * z7 + 19.0 * z5 + 17.0 * z3 - 15.0 * z) / (384.0 * df ** 3)
+            + (79.0 * z9 + 776.0 * z7 + 1482.0 * z5 - 1920.0 * z3 - 945.0 * z)
+            / (92160.0 * df ** 4))
+
+
+def _paired_from_stats(stats_dir, alpha=0.05):
+    """Per-seed paired analysis of an arena --dump-stats-dir (audit M3).
+
+    Arena plays every seed twice with the sides swapped, so the seed — not the
+    game — is the unit of evidence, and whatever the map handed a seat cancels
+    inside the pair. The estimate is the mean of the per-seed scores and its
+    interval comes from their sample variance, so it is as tight as the swap
+    actually made it and costs no extra games. Recorded only: no verdict reads
+    it, because both are EXP-registered rules on the unpaired counts.
+    """
+    import glob
+
+    per_seed = {}
+    for path in sorted(glob.glob(os.path.join(stats_dir, "game_*.json"))):
+        with open(path) as f:
+            doc = json.load(f)
+        winner = doc.get("winner_config")
+        if winner is None or "seed" not in doc:
+            continue
+        per_seed.setdefault(doc["seed"], {})[bool(doc.get("swap"))] = (
+            1.0 if winner == 1 else 0.5 if winner == 0 else 0.0
+        )
+
+    pairs = [(h[False] + h[True]) / 2.0 for h in per_seed.values() if len(h) == 2]
+    n = len(pairs)
+    if n == 0:
+        return None
+    p = sum(pairs) / n
+    out = {
+        "pairs": n,
+        "games": 2 * n,
+        "unpaired_seeds": len(per_seed) - n,
+        "model_sweeps": sum(1 for d in pairs if d == 1.0),
+        "splits": sum(1 for d in pairs if 0.0 < d < 1.0),
+        "opp_sweeps": sum(1 for d in pairs if d == 0.0),
+        "paired_win_rate": round(p, 4),
+        # The same games read as 2n independent trials: the instrument the
+        # pairing has to beat, quoted here so the comparison needs no arithmetic.
+        "unpaired_resolves_pp": _half_width(p, 2 * n),
+    }
+    if n < 2:
+        var = 0.0
+        lo, hi = _wilson(p, n)
+    else:
+        var = sum((d - p) ** 2 for d in pairs) / (n - 1)
+        # Floored at the rule of three: n identical pairs still leave room for
+        # an unseen outcome at rate 3/n, and a swap that cancels perfectly would
+        # otherwise report a zero-width interval as certainty.
+        half = max(_t_quantile(alpha / 2.0, n - 1) * math.sqrt(var / n),
+                   (3.0 / n) * max(p, 1.0 - p))
+        lo, hi = max(0.0, p - half), min(1.0, p + half)
+    out["paired_ci"] = [round(lo, 4), round(hi, 4)]
+    out["paired_resolves_pp"] = round(100.0 * (hi - lo) / 2.0, 2)
+    # Model score minus opponent score per seed, in [-1, 1]: 0 is a dead heat
+    # on the one map set both configurations played.
+    out["paired_diff"] = round(2.0 * p - 1.0, 4)
+    out["paired_diff_ci"] = [round(2.0 * lo - 1.0, 4), round(2.0 * hi - 1.0, 4)]
+    # Correlation between a seed's two halves. Var(pair mean) = p(1-p)(1+rho)/2
+    # against the binomial the unpaired interval assumes, so rho < 0 is the swap
+    # cancelling map bias and (1 + rho) is what the evidence costs in games —
+    # feed it to `ladder.py power --rho` to size the next budget.
+    spread = p * (1.0 - p)
+    rho = None
+    if n > 1 and spread > 0.0:
+        rho = round(min(max(2.0 * var / spread - 1.0, -1.0), 1.0), 4)
+    out["rho"] = rho
+    out["variance_ratio"] = None if rho is None else round(1.0 + rho, 4)
+    # Paired budget for the effect the registered bars are written against,
+    # beside the unpaired one the verdict already carries. rho off a single
+    # reading's pairs is itself noisy, so sizing never rides the extreme.
+    out["games_needed"] = required_games(
+        p, MIN_DETECTABLE_EFFECT, rho=max(rho, -0.9) if rho is not None else 0.0
+    )
+    return out
+
+
 def _append_reading(data, args, kind, opponent):
     win_rate = round(_win_rate(args.wins, args.losses, args.draws), 4)
     games = args.wins + args.losses + args.draws
@@ -393,6 +490,9 @@ def _append_reading(data, args, kind, opponent):
         behavior = _summarize_stats(args.stats_dir)
         if behavior is not None:
             reading["behavior"] = behavior
+        paired = _paired_from_stats(args.stats_dir)
+        if paired is not None:
+            reading["paired"] = paired
     data["readings"].append(reading)
     return reading
 
@@ -455,6 +555,12 @@ def cmd_record(args):
     if reading["resolves_pp"] > 100.0 * MIN_DETECTABLE_EFFECT:
         verdict["underpowered_for_pp"] = round(100.0 * MIN_DETECTABLE_EFFECT, 1)
         verdict["games_needed"] = required_games(reading["win_rate"], MIN_DETECTABLE_EFFECT)
+    if "paired" in reading:
+        pr = reading["paired"]
+        verdict["paired_win_rate"] = pr["paired_win_rate"]
+        verdict["paired_ci"] = pr["paired_ci"]
+        verdict["paired_resolves_pp"] = pr["paired_resolves_pp"]
+        verdict["paired_rho"] = pr["rho"]
     if "behavior" in reading:
         b = reading["behavior"]
         verdict["cities_curve"] = {
@@ -489,18 +595,34 @@ def cmd_freeze(args):
 def cmd_power(args):
     """Answer 'how many games do I need' before spending the compute, and
     'what could this reading have detected' after."""
+    rho = getattr(args, "rho", 0.0) or 0.0
     out = {
         "baseline": args.baseline,
         "effect_pp": round(100.0 * args.effect, 2),
         "power": args.power,
         "alpha": args.alpha,
-        "games_per_reading": required_games(args.baseline, args.effect, args.power, args.alpha),
-        "paired": False,
+        "rho": rho,
+        "games_per_reading": required_games(args.baseline, args.effect, args.power,
+                                            args.alpha, rho),
+        "paired": rho != 0.0,
     }
+    if rho:
+        out["games_per_reading_unpaired"] = required_games(
+            args.baseline, args.effect, args.power, args.alpha
+        )
     if args.games:
         out["at_games"] = args.games
         out["resolves_pp"] = _half_width(args.baseline, args.games)
         out["ci_at_games"] = _wilson(args.baseline, args.games)
+    print(json.dumps(out, indent=2))
+
+
+def cmd_paired(args):
+    """Paired per-seed reading of a retained arena dump. The dumps outlive the
+    match, so this re-reads any past gauge without replaying it."""
+    out = _paired_from_stats(args.stats_dir, args.alpha)
+    if out is None:
+        raise SystemExit(f"no complete seed pairs under {args.stats_dir}")
     print(json.dumps(out, indent=2))
 
 
@@ -520,7 +642,15 @@ def build_parser():
     pw.add_argument("--power", type=float, default=0.80)
     pw.add_argument("--alpha", type=float, default=0.05)
     pw.add_argument("--games", type=int, help="also report what this many games resolves to")
+    pw.add_argument("--rho", type=float, default=0.0,
+                    help="within-seed correlation left after the side swap, from a "
+                         "reading's `paired.rho`; negative buys games back")
     pw.set_defaults(func=cmd_power)
+
+    pa = sub.add_parser("paired", help="paired per-seed analysis of an arena dump (audit M3)")
+    pa.add_argument("--stats-dir", required=True, help="an arena --dump-stats-dir directory")
+    pa.add_argument("--alpha", type=float, default=0.05)
+    pa.set_defaults(func=cmd_paired)
 
     def match_args(p):
         p.add_argument("--run-id", default="")

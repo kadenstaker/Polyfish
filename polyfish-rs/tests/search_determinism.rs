@@ -46,7 +46,10 @@ fn make_evaluator() -> (Arc<PolyZeroNet>, Evaluator) {
 /// against permutes moves *within* a type and is invisible to a type-only
 /// comparison.
 fn move_list(game: &Game) -> Vec<String> {
-    game.legal_moves().iter().map(|m| format!("{m:?}")).collect()
+    game.legal_moves()
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .collect()
 }
 
 #[test]
@@ -76,7 +79,11 @@ fn legal_move_order_is_stable_after_play() {
     }
     let first = move_list(&game);
     for i in 0..30 {
-        assert_eq!(first, move_list(&game), "order varies on re-query (attempt {i})");
+        assert_eq!(
+            first,
+            move_list(&game),
+            "order varies on re-query (attempt {i})"
+        );
     }
 }
 
@@ -86,8 +93,8 @@ fn play(evaluator: &Evaluator, seed: u64, plies: usize) -> Vec<String> {
     let mut agent = GumbelMctsAgent::new(evaluator, 8, 4).with_search_seed(seed);
     let mut out = Vec::new();
     for i in 0..plies {
-        // move_count below TEMPERATURE_MOVE_THRESHOLD also exercises the
-        // visit-weighted sampling path, the third RNG draw site.
+        // TEMPERATURE_MOVE_THRESHOLD is 0, so the visit-weighted sampling path is
+        // unreachable and this walks the argmax path only.
         match agent.select_move_with_decomposed_visits(&mut game, i) {
             (Some(m), visits) => {
                 let shape: Vec<f32> = visits.iter().map(|v| v.visits).collect();
@@ -107,7 +114,10 @@ fn same_seed_replays_the_same_search() {
     let (_net, evaluator) = make_evaluator();
     let a = play(&evaluator, 20260818, 6);
     let b = play(&evaluator, 20260818, 6);
-    assert!(!a.is_empty(), "search produced no moves — test proves nothing");
+    assert!(
+        !a.is_empty(),
+        "search produced no moves — test proves nothing"
+    );
     assert_eq!(a, b, "same seed must replay the same move sequence");
 }
 
@@ -121,7 +131,10 @@ fn the_seed_is_actually_wired_to_the_noise() {
         let mut game = make_game(4242);
         let mut agent = GumbelMctsAgent::new(&evaluator, 8, 4).with_search_seed(seed);
         let (_m, visits) = agent.select_move_with_decomposed_visits(&mut game, 0);
-        seen.insert(format!("{:?}", visits.iter().map(|v| v.visits).collect::<Vec<_>>()));
+        seen.insert(format!(
+            "{:?}",
+            visits.iter().map(|v| v.visits).collect::<Vec<_>>()
+        ));
     }
     assert!(
         seen.len() > 1,
@@ -139,9 +152,15 @@ fn agents_do_not_share_a_stream_by_default() {
         let mut game = make_game(4242);
         let mut agent = GumbelMctsAgent::new(&evaluator, 8, 4);
         let (_m, visits) = agent.select_move_with_decomposed_visits(&mut game, 0);
-        seen.insert(format!("{:?}", visits.iter().map(|v| v.visits).collect::<Vec<_>>()));
+        seen.insert(format!(
+            "{:?}",
+            visits.iter().map(|v| v.visits).collect::<Vec<_>>()
+        ));
     }
-    assert!(seen.len() > 1, "freshly constructed agents all searched identically");
+    assert!(
+        seen.len() > 1,
+        "freshly constructed agents all searched identically"
+    );
 }
 
 /// The other three search agents own their streams too. `gumbel_mcts` is what

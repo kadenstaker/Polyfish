@@ -40,6 +40,33 @@ pub struct ReplayMetadata {
     pub source_diagnostics: Option<serde_json::Value>,
 }
 
+impl ReplayMetadata {
+    /// The source game's per-EndTurn checkpoints, empty when it wrote none.
+    /// Unknown diagnostic keys stay tolerated: only `endTurnCheckpoints` is read.
+    pub fn end_turn_checkpoints(&self) -> Result<Vec<SourceCheckpoint>, serde_json::Error> {
+        let Some(value) = self
+            .source_diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.get("endTurnCheckpoints"))
+        else {
+            return Ok(Vec::new());
+        };
+        serde_json::from_value(value.clone())
+    }
+}
+
+/// What the capturing source observed for one player immediately before it
+/// issued that player's EndTurn. Compared by `replay::verify`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCheckpoint {
+    pub turn_number: i32,
+    pub player_id: PlayerId,
+    pub score: i32,
+    pub stars: i32,
+    pub unit_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ReplaySource {

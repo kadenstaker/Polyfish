@@ -15,180 +15,67 @@ use std::path::{Path, PathBuf};
 const CSV_PATH: &str = "training_log.csv";
 const MOVES_PATH: &str = "moves_by_turn.json";
 const VALUE_DIST_PATH: &str = "value_distribution.json";
+const LADDER_PATH: &str = "ladder.json";
+const RATINGS_PATH: &str = "elo_ratings.json";
 
-#[derive(Debug, Clone)]
-struct MetricRow {
-    run_id: String,
-    iter_started_at: String,
-    iteration: i64,
-    games_file: String,
-    num_games: i64,
-    avg_score: f64,
-    max_score: f64,
-    p1_avg: f64,
-    p2_avg: f64,
-    loss: f64,
-    policy_loss: f64,
-    value_loss: f64,
-    value_r2: f64,
-    avg_captures: f64,
-    avg_cap_ruins: f64,
-    avg_cap_villages: f64,
-    avg_cap_cities: f64,
-    avg_cap_capitals: f64,
-    avg_harvests: f64,
-    avg_builds: f64,
-    avg_research: f64,
-    avg_attacks: f64,
-    avg_revealed_tiles: f64,
-    avg_captured_tiles: f64,
-    avg_spt_t0: f64,
-    avg_spt_t5: f64,
-    avg_spt_t10: f64,
-    avg_spt_t15: f64,
-    avg_spt_t20: f64,
-    avg_spt_t25: f64,
-    avg_spt_t30: f64,
-    villages_t2c_first: f64,
-    villages_t2c_p50: f64,
-    villages_t2c_p80: f64,
-    villages_t2c_all: f64,
-    ruins_t2c_p50: f64,
-    ruins_t2c_p80: f64,
-    ruins_t2c_all: f64,
-    avg_moves: f64,
-    match_type: String,
+/// Columns kept as strings even when they parse as numbers: `run_id` is a unix
+/// timestamp the dashboard compares and formats as text.
+const CSV_TEXT_COLUMNS: &[&str] = &[
+    "run_id",
+    "iter_started_at",
+    "run_started_at",
+    "games_file",
+    "match_type",
+];
+
+/// Every column of `training_log.csv` verbatim, numbers where the cell parses
+/// and null for blanks. Reading the header instead of a fixed struct means a
+/// column added to the CSV reaches every consumer without a change here; the
+/// fixed-struct reader this replaced silently dropped 23 of them.
+pub fn training_csv_rows() -> Vec<Value> {
+    parse_training_csv(&std::fs::read_to_string(CSV_PATH).unwrap_or_default())
 }
 
-fn parse_f64(s: &str) -> f64 {
-    s.trim().parse().unwrap_or(0.0)
-}
-
-fn parse_i64(s: &str) -> i64 {
-    s.trim().parse().unwrap_or(0)
-}
-
-fn read_csv_rows() -> Vec<MetricRow> {
-    let content = match std::fs::read_to_string(CSV_PATH) {
-        Ok(c) => c,
-        Err(_) => return vec![],
+fn parse_training_csv(content: &str) -> Vec<Value> {
+    let mut lines = content.lines().filter(|l| !l.trim().is_empty());
+    let Some(header) = lines.next() else {
+        return Vec::new();
     };
-    let mut lines = content.lines().filter(|l| !l.trim().is_empty()).peekable();
-    let Some(header_line) = lines.next() else {
-        return vec![];
-    };
-    let headers: Vec<&str> = header_line.split(',').collect();
-    let idx = |name: &str| -> Option<usize> { headers.iter().position(|h| *h == name) };
-
-    let col = |cols: &[&str], name: &str| -> String {
-        idx(name)
-            .and_then(|i| cols.get(i))
-            .map(|s| s.to_string())
-            .unwrap_or_default()
-    };
-
-    let mut rows = Vec::new();
-    for line in lines {
-        let cols: Vec<&str> = line.split(',').collect();
-        if cols.len() < 5 {
-            continue;
-        }
-        rows.push(MetricRow {
-            run_id: col(&cols, "run_id"),
-            iter_started_at: {
-                let v = col(&cols, "iter_started_at");
-                if v.is_empty() {
-                    col(&cols, "run_started_at")
-                } else {
-                    v
-                }
-            },
-            iteration: parse_i64(&col(&cols, "iteration")),
-            games_file: col(&cols, "games_file"),
-            num_games: parse_i64(&col(&cols, "num_games")),
-            avg_score: parse_f64(&col(&cols, "avg_score")),
-            max_score: parse_f64(&col(&cols, "max_score")),
-            p1_avg: parse_f64(&col(&cols, "p1_avg")),
-            p2_avg: parse_f64(&col(&cols, "p2_avg")),
-            loss: parse_f64(&col(&cols, "loss")),
-            policy_loss: parse_f64(&col(&cols, "policy_loss")),
-            value_loss: parse_f64(&col(&cols, "value_loss")),
-            value_r2: parse_f64(&col(&cols, "value_r2")),
-            avg_captures: parse_f64(&col(&cols, "avg_captures")),
-            avg_cap_ruins: parse_f64(&col(&cols, "avg_cap_ruins")),
-            avg_cap_villages: parse_f64(&col(&cols, "avg_cap_villages")),
-            avg_cap_cities: parse_f64(&col(&cols, "avg_cap_cities")),
-            avg_cap_capitals: parse_f64(&col(&cols, "avg_cap_capitals")),
-            avg_harvests: parse_f64(&col(&cols, "avg_harvests")),
-            avg_builds: parse_f64(&col(&cols, "avg_builds")),
-            avg_research: parse_f64(&col(&cols, "avg_research")),
-            avg_attacks: parse_f64(&col(&cols, "avg_attacks")),
-            avg_revealed_tiles: parse_f64(&col(&cols, "avg_revealed_tiles")),
-            avg_captured_tiles: parse_f64(&col(&cols, "avg_captured_tiles")),
-            avg_spt_t0: parse_f64(&col(&cols, "avg_spt_t0")),
-            avg_spt_t5: parse_f64(&col(&cols, "avg_spt_t5")),
-            avg_spt_t10: parse_f64(&col(&cols, "avg_spt_t10")),
-            avg_spt_t15: parse_f64(&col(&cols, "avg_spt_t15")),
-            avg_spt_t20: parse_f64(&col(&cols, "avg_spt_t20")),
-            avg_spt_t25: parse_f64(&col(&cols, "avg_spt_t25")),
-            avg_spt_t30: parse_f64(&col(&cols, "avg_spt_t30")),
-            villages_t2c_first: parse_f64(&col(&cols, "villages_t2c_first")),
-            villages_t2c_p50: parse_f64(&col(&cols, "villages_t2c_p50")),
-            villages_t2c_p80: parse_f64(&col(&cols, "villages_t2c_p80")),
-            villages_t2c_all: parse_f64(&col(&cols, "villages_t2c_all")),
-            ruins_t2c_p50: parse_f64(&col(&cols, "ruins_t2c_p50")),
-            ruins_t2c_p80: parse_f64(&col(&cols, "ruins_t2c_p80")),
-            ruins_t2c_all: parse_f64(&col(&cols, "ruins_t2c_all")),
-            avg_moves: parse_f64(&col(&cols, "avg_moves")),
-            match_type: col(&cols, "match_type"),
-        });
-    }
-    rows
+    let headers: Vec<&str> = header.split(',').collect();
+    lines
+        .filter(|line| line.split(',').count() >= 5)
+        .map(|line| {
+            let cells: Vec<&str> = line.split(',').collect();
+            let row: serde_json::Map<String, Value> = headers
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let cell = cells.get(i).copied().unwrap_or("").trim();
+                    let value = if CSV_TEXT_COLUMNS.contains(name) {
+                        Value::from(cell)
+                    } else if cell.is_empty() {
+                        Value::Null
+                    } else {
+                        cell.parse::<f64>()
+                            .map(Value::from)
+                            .unwrap_or_else(|_| Value::from(cell))
+                    };
+                    ((*name).to_string(), value)
+                })
+                .collect();
+            Value::Object(row)
+        })
+        .collect()
 }
 
-fn row_to_json(r: &MetricRow) -> Value {
-    json!({
-        "run_id": r.run_id,
-        "iter_started_at": r.iter_started_at,
-        "iteration": r.iteration,
-        "games_file": r.games_file,
-        "num_games": r.num_games,
-        "avg_score": r.avg_score,
-        "max_score": r.max_score,
-        "p1_avg": r.p1_avg,
-        "p2_avg": r.p2_avg,
-        "loss": r.loss,
-        "policy_loss": r.policy_loss,
-        "value_loss": r.value_loss,
-        "value_r2": r.value_r2,
-        "avg_captures": r.avg_captures,
-        "avg_cap_ruins": r.avg_cap_ruins,
-        "avg_cap_villages": r.avg_cap_villages,
-        "avg_cap_cities": r.avg_cap_cities,
-        "avg_cap_capitals": r.avg_cap_capitals,
-        "avg_harvests": r.avg_harvests,
-        "avg_builds": r.avg_builds,
-        "avg_research": r.avg_research,
-        "avg_attacks": r.avg_attacks,
-        "avg_revealed_tiles": r.avg_revealed_tiles,
-        "avg_captured_tiles": r.avg_captured_tiles,
-        "avg_spt_t0": r.avg_spt_t0,
-        "avg_spt_t5": r.avg_spt_t5,
-        "avg_spt_t10": r.avg_spt_t10,
-        "avg_spt_t15": r.avg_spt_t15,
-        "avg_spt_t20": r.avg_spt_t20,
-        "avg_spt_t25": r.avg_spt_t25,
-        "avg_spt_t30": r.avg_spt_t30,
-        "villages_t2c_first": r.villages_t2c_first,
-        "villages_t2c_p50": r.villages_t2c_p50,
-        "villages_t2c_p80": r.villages_t2c_p80,
-        "villages_t2c_all": r.villages_t2c_all,
-        "ruins_t2c_p50": r.ruins_t2c_p50,
-        "ruins_t2c_p80": r.ruins_t2c_p80,
-        "ruins_t2c_all": r.ruins_t2c_all,
-        "avg_moves": r.avg_moves,
-        "match_type": r.match_type,
-    })
+fn cell_str<'a>(row: &'a Value, name: &str) -> &'a str {
+    row.get(name).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// A blank or unparseable cell reads 0, as it did through the fixed-struct
+/// reader's parse fallback, so the runs list keeps its shape.
+fn cell_f64(row: &Value, name: &str) -> f64 {
+    row.get(name).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
 #[derive(Debug, Serialize)]
@@ -202,34 +89,43 @@ struct RunSummary {
     best_score: f64,
 }
 
-pub async fn api_runs() -> Json<Value> {
-    let rows = read_csv_rows();
-    let mut by_run: HashMap<String, Vec<&MetricRow>> = HashMap::new();
-    for row in &rows {
-        by_run.entry(row.run_id.clone()).or_default().push(row);
+fn run_summaries(rows: &[Value]) -> Vec<RunSummary> {
+    let mut by_run: HashMap<&str, Vec<&Value>> = HashMap::new();
+    for row in rows {
+        by_run.entry(cell_str(row, "run_id")).or_default().push(row);
     }
 
     let mut summaries: Vec<RunSummary> = by_run
         .into_iter()
         .map(|(run_id, mut run_rows)| {
-            run_rows.sort_by_key(|r| r.iteration);
-            let first = run_rows.first().unwrap();
-            let last = run_rows.last().unwrap();
-            let best_score = run_rows.iter().map(|r| r.max_score).fold(0.0_f64, f64::max);
+            run_rows.sort_by(|a, b| cell_f64(a, "iteration").total_cmp(&cell_f64(b, "iteration")));
+            let first = run_rows[0];
+            let last = run_rows[run_rows.len() - 1];
+            let started = match cell_str(first, "iter_started_at") {
+                "" => cell_str(first, "run_started_at"),
+                v => v,
+            };
             RunSummary {
-                run_id: run_id.clone(),
-                run_started_at: first.iter_started_at.clone(),
+                run_id: run_id.to_string(),
+                run_started_at: started.to_string(),
                 iter_count: run_rows.len(),
-                iter_min: first.iteration,
-                iter_max: last.iteration,
-                last_loss: last.loss,
-                best_score,
+                iter_min: cell_f64(first, "iteration") as i64,
+                iter_max: cell_f64(last, "iteration") as i64,
+                last_loss: cell_f64(last, "loss"),
+                best_score: run_rows
+                    .iter()
+                    .map(|r| cell_f64(r, "max_score"))
+                    .fold(0.0_f64, f64::max),
             }
         })
         .collect();
 
     summaries.sort_by(|a, b| b.run_id.cmp(&a.run_id));
-    Json(json!(summaries))
+    summaries
+}
+
+pub async fn api_runs() -> Json<Value> {
+    Json(json!(run_summaries(&training_csv_rows())))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -238,13 +134,15 @@ pub struct RunFilter {
 }
 
 pub async fn api_training_metrics(Query(q): Query<RunFilter>) -> Json<Value> {
-    let rows = read_csv_rows();
-    let filtered: Vec<Value> = rows
-        .iter()
-        .filter(|r| q.run.as_ref().is_none_or(|id| &r.run_id == id))
-        .map(row_to_json)
+    let rows: Vec<Value> = training_csv_rows()
+        .into_iter()
+        .filter(|r| {
+            q.run
+                .as_ref()
+                .is_none_or(|id| cell_str(r, "run_id") == id.as_str())
+        })
         .collect();
-    Json(json!(filtered))
+    Json(Value::Array(rows))
 }
 
 pub async fn api_moves_by_turn(Query(q): Query<RunFilter>) -> Json<Value> {
@@ -259,10 +157,25 @@ pub async fn api_moves_by_turn(Query(q): Query<RunFilter>) -> Json<Value> {
     Json(all)
 }
 
+/// The ladder plus elo.py's joint fit under `ratings`, once the loop has
+/// written one. A reading's own `elo_est` is one match chained onto one
+/// anchor's number; the fit is every recorded match at once.
+fn ladder_with_ratings(ladder: &str, ratings: Option<String>) -> Value {
+    let mut all: Value =
+        serde_json::from_str(ladder).unwrap_or_else(|_| json!({ "anchors": [], "readings": [] }));
+    let fitted = ratings.and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    if let (Some(obj), Some(fitted)) = (all.as_object_mut(), fitted) {
+        obj.insert("ratings".to_string(), fitted);
+    }
+    all
+}
+
 pub async fn api_elo_ladder() -> Json<Value> {
-    let content = std::fs::read_to_string("ladder.json").unwrap_or_else(|_| "{}".to_string());
-    let all: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({ "anchors": [], "readings": [] }));
-    Json(all)
+    let ladder = std::fs::read_to_string(LADDER_PATH).unwrap_or_else(|_| "{}".to_string());
+    Json(ladder_with_ratings(
+        &ladder,
+        std::fs::read_to_string(RATINGS_PATH).ok(),
+    ))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -525,5 +438,61 @@ pub struct ApiError(StatusCode, String);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CSV: &str = concat!(
+        "run_id,run_started_at,iter_started_at,iteration,loss,max_score,brand_new_column\n",
+        "1755,2026-08-01T00:00:00Z,2026-08-01T01:00:00Z,2,,12,7\n",
+        "1755,2026-08-01T00:00:00Z,,1,0.5,15,\n",
+    );
+
+    #[test]
+    fn a_column_the_reader_has_never_heard_of_still_reaches_the_dashboard() {
+        let rows = parse_training_csv(CSV);
+        assert_eq!(rows[0]["brand_new_column"], 7.0);
+    }
+
+    #[test]
+    fn blanks_are_null_and_text_columns_stay_text() {
+        let rows = parse_training_csv(CSV);
+        assert_eq!(rows[0]["run_id"], "1755");
+        assert_eq!(rows[1]["iter_started_at"], "");
+        assert!(rows[0]["loss"].is_null());
+        assert!(rows[1]["brand_new_column"].is_null());
+    }
+
+    #[test]
+    fn a_run_summary_reads_a_blank_cell_as_zero_and_falls_back_for_its_start() {
+        let summaries = run_summaries(&parse_training_csv(CSV));
+        assert_eq!(summaries.len(), 1);
+        let run = &summaries[0];
+        assert_eq!(run.run_started_at, "2026-08-01T00:00:00Z");
+        assert_eq!((run.iter_min, run.iter_max, run.iter_count), (1, 2, 2));
+        assert_eq!(run.last_loss, 0.0);
+        assert_eq!(run.best_score, 15.0);
+    }
+
+    #[test]
+    fn the_joint_fit_rides_along_with_the_ladder() {
+        let out = ladder_with_ratings(
+            r#"{"anchors":[],"readings":[]}"#,
+            Some(r#"{"greedy":{"elo":0.0}}"#.to_string()),
+        );
+        assert_eq!(out["ratings"]["greedy"]["elo"], 0.0);
+        assert!(out["readings"].is_array());
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_fit_leaves_the_ladder_intact() {
+        for ratings in [None, Some("not json".to_string())] {
+            let out = ladder_with_ratings(r#"{"anchors":[{"name":"greedy"}]}"#, ratings);
+            assert_eq!(out["anchors"][0]["name"], "greedy");
+            assert!(out.get("ratings").is_none());
+        }
     }
 }
