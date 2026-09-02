@@ -18,16 +18,17 @@ fn next_rng_xxhash(current_seed: &mut i64, initial_seed: i64) -> i64 {
     *current_seed
 }
 
-/// Move `delta` score to the tribe whose city territory holds `idx`, which is
-/// the tribe the canonical recompute prices the structure into. A structure
-/// outside every territory is worth nothing to anyone, so it scores nothing.
+/// Move `delta` score to the tribe that owns tile `idx`, which is the tribe the
+/// canonical recompute prices the structure into. A structure on unowned
+/// ground is worth nothing to anyone, so it scores nothing.
 fn adjust_structure_score(state: &mut GameState, idx: i32, delta: i32) -> UndoCallback {
     if delta == 0 {
         return Box::new(|_| {});
     }
-    let Some(owner) = crate::score::territory_owner(state, idx) else {
+    let owner = state.tiles.get(&idx).map(|t| t.owner).unwrap_or(0);
+    if owner == 0 {
         return Box::new(|_| {});
-    };
+    }
     if let Some(tribe) = state.tribes.get_mut(&owner) {
         tribe.score += delta;
     }

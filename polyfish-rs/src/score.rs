@@ -51,18 +51,6 @@ pub fn unit_score(unit: &crate::states::UnitState) -> i32 {
     cost * UNIT_COST_SCORE
 }
 
-/// The tribe the canonical recompute credits tile `idx` to: its owner, if that
-/// owner still holds it inside one of its cities' territory.
-pub fn territory_owner(state: &GameState, idx: i32) -> Option<PlayerId> {
-    let owner = state.tiles.get(&idx).map(|t| t.owner).filter(|o| *o != 0)?;
-    let tribe = state.tribes.get(&owner)?;
-    tribe
-        .cities
-        .iter()
-        .any(|c| c._territory.contains(&idx))
-        .then_some(owner)
-}
-
 /// What a city is worth to its owner on its own: the city, its population and
 /// its parks. Territory and the structures on it are priced per *tile*, by
 /// ownership (see `breakdown`), so they are not part of this - a capture moves
@@ -138,21 +126,17 @@ pub fn breakdown(state: &GameState, player_id: PlayerId) -> ScoreBreakdown {
         add_city_core(city, &mut b);
     }
 
-    // Territory is priced per distinct tile the tribe still owns. Cities two
-    // tiles apart share territory entries, and a stolen tile stays listed in
-    // the city that lost it, so counting `_territory` per city double-counts
-    // the first and mis-credits the second (#40).
-    let mut counted: std::collections::HashSet<i32> = std::collections::HashSet::new();
-    for city in &tribe.cities {
-        for &idx in &city._territory {
-            let owned = state.tiles.get(&idx).map(|t| t.owner) == Some(player_id);
-            if !owned || !counted.insert(idx) {
-                continue;
-            }
-            b.territory += CITY_TERRITORY_SCORE;
-            if let Some(structure) = crate::functions::get_structure_at(state, idx) {
-                b.structures += structure_score(structure);
-            }
+    // Territory is priced off `tile.owner`, the one bit `claim_territory`
+    // scores transitions of. City `_territory` lists are not consulted: cities
+    // two tiles apart share entries, a stolen tile stays listed in the city
+    // that lost it, and an eliminated tribe keeps tiles no city lists (#40).
+    for (&idx, tile) in &state.tiles {
+        if tile.owner != player_id {
+            continue;
+        }
+        b.territory += CITY_TERRITORY_SCORE;
+        if let Some(structure) = crate::functions::get_structure_at(state, idx) {
+            b.structures += structure_score(structure);
         }
     }
 

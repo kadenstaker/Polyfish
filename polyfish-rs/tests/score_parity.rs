@@ -10,7 +10,7 @@
 use polyfish::game::Game;
 use polyfish::score::{ScoreBreakdown, breakdown};
 use polyfish::states::{GameState, PlayerId};
-use polyfish::types::{MapSize, MapType, ModeType, TribeType};
+use polyfish::types::{MapSize, MapType, ModeType, MoveType, TribeType};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -24,19 +24,39 @@ const TRIBES: [TribeType; 6] = [
     TribeType::Luxidoor,
 ];
 
+/// Every tribe, dead ones included: an elimination is the one move that
+/// re-prices a whole tribe at once, and its score still feeds the others'
+/// relative reward.
 fn snapshot(state: &GameState) -> HashMap<PlayerId, (i32, ScoreBreakdown)> {
     state
         .tribes
         .iter()
-        .filter(|(_, t)| t.killed_turn <= 0 && t.resigned_turn <= 0)
         .map(|(id, t)| (*id, (t.score, breakdown(state, *id))))
         .collect()
 }
 
-fn play_and_check(seed: u64, t1: TribeType, t2: TribeType, mode: ModeType, max_turns: i32) {
+struct Playout {
+    seed: u64,
+    tribes: [TribeType; 2],
+    mode: ModeType,
+    map_type: MapType,
+    max_turns: i32,
+    /// Take a capture or attack whenever one is legal; random play rarely conquers.
+    conquest: bool,
+}
+
+fn play_and_check(p: Playout) {
+    let Playout {
+        seed,
+        tribes: [t1, t2],
+        mode,
+        map_type,
+        max_turns,
+        conquest,
+    } = p;
     let gen_settings = polyfish::mapgen::MapGenSettings {
         size: MapSize::Tiny,
-        map_type: MapType::Drylands,
+        map_type,
         tribes: vec![t1, t2],
         seed: seed as i64,
         symmetric: true,
@@ -58,7 +78,15 @@ fn play_and_check(seed: u64, t1: TribeType, t2: TribeType, mode: ModeType, max_t
         if legal.is_empty() {
             break;
         }
-        let m = &legal[rng.random_range(0..legal.len())];
+        let pick = conquest
+            .then(|| {
+                legal
+                    .iter()
+                    .position(|m| matches!(m.move_type(), MoveType::Capture | MoveType::Attack))
+            })
+            .flatten()
+            .unwrap_or_else(|| rng.random_range(0..legal.len()));
+        let m = &legal[pick];
         let desc = m.describe(&game.state);
         assert!(
             game.play_move(m.as_ref()).is_some(),
@@ -102,7 +130,37 @@ fn incremental_score_tracks_the_recompute() {
         } else {
             ModeType::Perfection
         };
-        play_and_check(seed, t1, t2, mode, 30);
+        play_and_check(Playout {
+            seed,
+            tribes: [t1, t2],
+            mode,
+            map_type: MapType::Drylands,
+            max_turns: 30,
+            conquest: false,
+        });
+    }
+}
+
+/// Capturing a tribe's last city re-prices everything it owned in one move.
+/// The recompute must price the dead tribe's leftover territory the same way
+/// the claim that took it did, so this walks eliminations on every map type
+/// (the Archipelago case drifted by one tile before the fix).
+#[test]
+fn elimination_settles_every_owned_tile() {
+    for (seed, map_type) in [
+        (2u64, MapType::Archipelago),
+        (5, MapType::Archipelago),
+        (3, MapType::Continents),
+        (4, MapType::Drylands),
+    ] {
+        play_and_check(Playout {
+            seed,
+            tribes: [TribeType::Luxidoor, TribeType::Elyrion],
+            mode: ModeType::Domination,
+            map_type,
+            max_turns: 30,
+            conquest: true,
+        });
     }
 }
 
@@ -114,12 +172,13 @@ fn incremental_score_tracks_the_recompute() {
 #[ignore]
 fn capture_transfers_the_whole_city_contribution() {
     for seed in 20..=25u64 {
-        play_and_check(
+        play_and_check(Playout {
             seed,
-            TribeType::Imperius,
-            TribeType::Bardur,
-            ModeType::Domination,
-            45,
-        );
+            tribes: [TribeType::Imperius, TribeType::Bardur],
+            mode: ModeType::Domination,
+            map_type: MapType::Drylands,
+            max_turns: 45,
+            conquest: false,
+        });
     }
 }

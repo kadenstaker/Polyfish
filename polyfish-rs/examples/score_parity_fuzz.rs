@@ -13,7 +13,7 @@
 use polyfish::game::Game;
 use polyfish::score::{ScoreBreakdown, breakdown};
 use polyfish::states::{GameState, PlayerId};
-use polyfish::types::{ModeType, TribeType};
+use polyfish::types::{MapType, ModeType, TribeType};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -37,13 +37,17 @@ const SPECIAL_TRIBES: [TribeType; 3] =
     [TribeType::Aquarion, TribeType::Elyrion, TribeType::Cymanti];
 
 const USAGE: &str = "usage: score_parity_fuzz [num_seeds] [start_seed] \
-[--tribes=core|all] [--mode=alternate|perfection|domination] [--max-turns=N] [--first]";
+[--tribes=core|all] [--mode=alternate|perfection|domination] \
+[--map=rotate|drylands|continents|archipelago] [--max-turns=N] [--first]";
+
+const MAP_TYPES: [MapType; 3] = [MapType::Drylands, MapType::Continents, MapType::Archipelago];
 
 struct Args {
     num_seeds: u64,
     start_seed: u64,
     tribes_all: bool,
     mode: Option<ModeType>,
+    map: Option<MapType>,
     max_turns: i32,
     stop_on_first: bool,
 }
@@ -52,6 +56,7 @@ fn parse_args() -> Args {
     let mut positionals: Vec<String> = Vec::new();
     let mut tribes_all = false;
     let mut mode = None;
+    let mut map = None;
     let mut max_turns = 30;
     let mut stop_on_first = false;
 
@@ -67,6 +72,10 @@ fn parse_args() -> Args {
             ("mode", "perfection") => mode = Some(ModeType::Perfection),
             ("mode", "domination") => mode = Some(ModeType::Domination),
             ("mode", "alternate") => mode = None,
+            ("map", "rotate") => map = None,
+            ("map", "drylands") => map = Some(MapType::Drylands),
+            ("map", "continents") => map = Some(MapType::Continents),
+            ("map", "archipelago") => map = Some(MapType::Archipelago),
             ("max-turns", v) => max_turns = v.parse().unwrap_or(30),
             ("first", "") => stop_on_first = true,
             _ => {
@@ -91,17 +100,18 @@ fn parse_args() -> Args {
         start_seed: positional(1, 1),
         tribes_all,
         mode,
+        map,
         max_turns,
         stop_on_first,
     }
 }
 
-/// Per-tribe incremental score and canonical breakdown, for tribes still alive.
+/// Per-tribe incremental score and canonical breakdown, dead tribes included:
+/// elimination re-prices a whole tribe in one move.
 fn snapshot(state: &GameState) -> HashMap<PlayerId, (i32, ScoreBreakdown)> {
     state
         .tribes
         .iter()
-        .filter(|(_, t)| t.killed_turn <= 0 && t.resigned_turn <= 0)
         .map(|(id, t)| (*id, (t.score, breakdown(state, *id))))
         .collect()
 }
@@ -145,7 +155,9 @@ fn main() {
 
         let gen_settings = polyfish::mapgen::MapGenSettings {
             size: polyfish::types::MapSize::Tiny,
-            map_type: polyfish::types::MapType::Drylands,
+            map_type: args
+                .map
+                .unwrap_or(MAP_TYPES[seed as usize % MAP_TYPES.len()]),
             tribes: vec![t1, t2],
             seed: seed as i64,
             symmetric: true,

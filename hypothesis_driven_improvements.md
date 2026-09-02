@@ -53,7 +53,11 @@ games at campaign length (mean 132.5 points, ~1.8% of final score, max 3.6%).
 Six incremental sources were wrong and two recompute-side rules were: a
 structure on a tile two cities share was priced twice, and a Park taken more
 than once was priced once. Both sides now read one definition (`score.rs`), and
-random-play parity is clean over 184k moves.
+random-play parity is clean over 184k moves. A second pass (Sep 2, 2026) found
+that check had excluded dead tribes, hiding a one-tile drift on every
+elimination; territory is now priced off `tile.owner` alone (upstream's
+definition) and parity is clean over 98k moves with dead tribes and all three
+map types in the check. Same conclusion: the currency moved again, cold-start.
 
 Every label in every existing `games_*.safetensors` was built under the old,
 drifting definition. That is a reason to cold-start rather than resume on the

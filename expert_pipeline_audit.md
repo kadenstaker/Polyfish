@@ -874,6 +874,20 @@ counted once per reward taken rather than once per city. Every mutation site now
 reads the same `score.rs` helpers as the recompute. Parity is clean over 184k
 moves of random play across 200 seeds and all 15 tribes.
 
+**Second pass (Sep 2, 2026).** Cross-running upstream's (HenBOMB) parity probe
+against this engine found a seventh source the probes above could not see: both
+`snapshot` helpers filtered out killed tribes, so the one move that re-prices a
+whole tribe — capturing its last city — was never checked on the loser's side.
+There, the recompute credited an owned tile only if some city's `_territory`
+still listed it, while `claim_territory` had deducted every tile whose owner bit
+changed, so every elimination left the dead tribe 20 low. Adopted upstream's
+definition: territory and structures are priced off `tile.owner` alone, `_territory`
+is never consulted, and `adjust_structure_score` credits the tile's owner. The
+gate now snapshots dead tribes and walks eliminations on all three map types;
+the fuzz rotates map types by default. Re-verify:
+`cargo test --release --test score_parity` and
+`cargo run --release --example score_parity_fuzz -- 300 1 --tribes=all`.
+
 This is a change to the reward/value currency itself: TD labels built before it
 carried up to ~3.6% of final score as drift, and archived `games_*.safetensors`
 are labelled under the old definition. It does not resolve A2b, which is still

@@ -48,12 +48,14 @@ const GOLDEN_CHANNELS: &[(usize, u64)] = &[
     (140, 0xf60451bfe10e9648),
     (141, 0x1fec64fa6dffd1a0),
 ];
+// Slot 4 is score: it moved 0.02475 -> 0.02575 when the recompute began
+// pricing territory off `tile.owner`, which counts the capital's own tile (#40).
 const GOLDEN_PLAYER: &[f32] = &[
     0.06666667,
     1.0,
     0.16666667,
     0.05,
-    0.02475,
+    0.02575,
     0.08,
     0.4117647,
     1.0,
