@@ -625,10 +625,7 @@ pub fn is_enemy_capital(state: &GameState, idx: i32, pov_id: PlayerId) -> bool {
     if !is_enemy_city(state, idx, pov_id) {
         return false;
     }
-    state
-        .tiles
-        .get(&idx)
-        .map_or(false, |t| t.capital_of != 0)
+    state.tiles.get(&idx).map_or(false, |t| t.capital_of != 0)
 }
 
 /// Check if a tile is frozen (has Ice terrain or Polaris climate)
@@ -1026,99 +1023,11 @@ pub fn get_tech_cost(tribe: &TribeState, tech: TechnologyType) -> i32 {
     crate::settings::technology::get_tech_cost(cities_count, tier, has_philo)
 }
 
-/// Calculate the detailed tribe score as per Polytopia rules
+/// Calculate the detailed tribe score as per Polytopia rules.
+/// The rules themselves live in `score::breakdown`, which is also what the
+/// parity probe diffs an incremental `tribe.score` against (#40).
 pub fn calculate_detailed_tribe_score(state: &GameState, player_id: PlayerId) -> i32 {
-    let tribe = match state.tribes.get(&player_id) {
-        Some(t) => t,
-        None => return 0,
-    };
-
-    let mut score = 0;
-
-    // 100 per level, 20 per territory
-    for city in &tribe.cities {
-        // City score: 100 + 50 per level above 1
-        let city_score = if city.level >= 1 {
-            100 + (city.level - 1) * 50
-        } else {
-            0
-        };
-        // Territory: 20 per tile
-        score += city_score + (city._territory.len() as i32 * 20);
-
-        // Structure scores (Temples & Monuments)
-        for &tile_idx in &city._territory {
-            if let Some(structure) = crate::functions::get_structure_at(state, tile_idx) {
-                match structure.structure_type {
-                    StructureType::Temple
-                    | StructureType::WaterTemple
-                    | StructureType::ForestTemple
-                    | StructureType::MountainTemple
-                    | StructureType::IceTemple => {
-                        // Temples: 100 per level
-                        score += structure.level * 100;
-                    }
-                    _ => {
-                        // Monuments and others
-                        let settings = crate::settings::structures::get_structure_setting(
-                            structure.structure_type,
-                        );
-                        score += settings.reward_score;
-                    }
-                }
-            }
-        }
-
-        // Park: 250 points
-        if city.has_park() {
-            score += 250;
-        }
-
-        // Population: 5 points per population
-        score += city.population * 5;
-    }
-
-    // Except for Luxidoor, which already starts with a level 3 city (capital)
-    // lvl 1: 2 pop
-    // lvl 2: 3 pop
-    if state.tribes.get(&player_id).unwrap().tribe_type == TribeType::Luxidoor {
-        score -= 5 * 5;
-    }
-
-    // 5 per revealed tile (explored by our explorers)
-    let explored_count = state
-        .tiles
-        .values()
-        .filter(|t| t.explorers.contains(&player_id))
-        .count() as i32;
-    score += explored_count * 5;
-
-    // 5 per star of unit cost
-    for unit in &tribe.units {
-        // Converted units do not change score (worth 0 for new owner)
-        if unit.converted {
-            continue;
-        }
-
-        // Score = 5 * (Stars spent on unit + Stars spent on its passenger/original carrier)
-        let cost = crate::settings::units::get_unit_setting(unit.unit_type).cost
-            + unit
-                .passenger_type
-                .map(|p| crate::settings::units::get_unit_setting(p).cost)
-                .unwrap_or(0);
-
-        score += cost * 5;
-    }
-
-    // 100 per tech tier
-    for tech in &tribe.tech_vanilla {
-        let tier = crate::settings::technology::get_technology_setting(tech.tech_type)
-            .tier
-            .unwrap_or(1);
-        score += 100 * tier;
-    }
-
-    score
+    crate::score::breakdown(state, player_id).total()
 }
 
 /// Sync all tribes' scores based on current state

@@ -584,6 +584,15 @@ pub fn step_unit(
         }
     }
 
+    // Embark/disembark rewrites the unit's type (and passenger), which changes
+    // what the canonical recompute prices it at; the score has to follow (#40).
+    let score_before_transform = state
+        .tribes
+        .get(&unit_owner)
+        .and_then(|t| t.units.get(unit_idx))
+        .map(crate::score::unit_score)
+        .unwrap_or(0);
+
     // Check embark/disembark
     let struct_at_dest = get_structure_type_at(state, to_tile_idx);
     let is_port = struct_at_dest == Some(StructureType::Port);
@@ -662,6 +671,24 @@ pub fn step_unit(
                 unit.effects.insert(UnitEffect::Invisible);
             }
         }
+    }
+
+    let score_after_transform = state
+        .tribes
+        .get(&unit_owner)
+        .and_then(|t| t.units.get(unit_idx))
+        .map(crate::score::unit_score)
+        .unwrap_or(0);
+    let transform_score_diff = score_after_transform - score_before_transform;
+    if transform_score_diff != 0 {
+        if let Some(tribe) = state.tribes.get_mut(&unit_owner) {
+            tribe.score += transform_score_diff;
+        }
+        undos.push(Box::new(move |s: &mut GameState| {
+            if let Some(t) = s.tribes.get_mut(&unit_owner) {
+                t.score -= transform_score_diff;
+            }
+        }));
     }
 
     let has_dash = crate::functions::has_skill(
