@@ -361,7 +361,10 @@ struct GameResult {
     /// Index within this run's game batch; games 2k/2k+1 form a mirror pair.
     game_idx: usize,
     history: Vec<HistoryStep>,
+    /// Raw final scoreboard: what the replay, recap and metrics report.
     scores: HashMap<i32, i32>,
+    /// Final `reward::progress` per player: what the value label reads.
+    progress: HashMap<i32, i32>,
     final_cities: HashMap<i32, i32>,
     total_cities: i32,
     /// End-of-game tile owner per grid cell (row-major y*MAP_SIZE+x, 0 =
@@ -508,9 +511,9 @@ fn outcome_for(result: &GameResult, p_id: i32, reward_shaping: bool) -> f32 {
     if result.decisive {
         return if p_id == result.winner_id { 1.0 } else { -1.0 };
     }
-    let my_final = result.scores.get(&p_id).copied().unwrap_or(0) as f32;
+    let my_final = result.progress.get(&p_id).copied().unwrap_or(0) as f32;
     let opp_final = result
-        .scores
+        .progress
         .iter()
         .filter(|(id, _)| **id != p_id)
         .map(|(_, score)| *score as f32)
@@ -942,8 +945,9 @@ fn play_single_game(
                     return None;
                 }
             };
-            // Snapshot scores/SPT at this moment (pre-move) for the TD label.
-            let (my_score_now, opp_score_now) = reward::score_snapshot(&game.state, pov);
+            // Snapshot progress (score + army, EXP_LABEL_004) and SPT at this
+            // moment (pre-move) for the TD label.
+            let (my_score_now, opp_score_now) = reward::progress_snapshot(&game.state, pov);
             let (my_spt_now, opp_spt_now) = reward::spt_snapshot(&game.state, pov);
             if progress == ProgressMode::Full && move_count > 0 && move_count % 10 == 0 {
                 eprintln!(
@@ -1009,10 +1013,12 @@ fn play_single_game(
     // In Domination, the winner is the last tribe alive.
     // If the game timed out (safety cap), use score as tiebreaker.
     let mut scores: HashMap<i32, i32> = HashMap::new();
+    let mut final_progress: HashMap<i32, i32> = HashMap::new();
     let mut alive: HashMap<i32, bool> = HashMap::new();
     let mut score_drift = 0i32;
     for (id, t) in &game.state.tribes {
         scores.insert(*id, t.score);
+        final_progress.insert(*id, reward::progress(&game.state, *id));
         let is_alive = t.killed_turn <= 0 && t.resigned_turn <= 0;
         alive.insert(*id, is_alive);
         if is_alive {
@@ -1122,6 +1128,7 @@ fn play_single_game(
         game_idx,
         history: game_history,
         scores,
+        progress: final_progress,
         final_cities,
         total_cities,
         final_tile_owners,
@@ -2231,7 +2238,7 @@ fn main() -> anyhow::Result<()> {
         // Domination: Win/Loss is the primary signal.
         // The winner gets +1.0, loser gets -1.0.
         // If timeout, use score differential as a softer signal.
-        let final_scores = &result.scores;
+        let final_scores = &result.progress;
 
         let label_steps: Vec<LabelStep> = result.history.iter().map(LabelStep::from).collect();
         let td_deltas = td_lambda_labels(&label_steps, final_scores, LAMBDA_RETURN);

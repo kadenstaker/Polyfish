@@ -887,6 +887,51 @@ fires would be a training-behaviour change bought with no evidence.
 NOT YET RUN.
 
 
+## EXP_LABEL_004: Army-weighted Domination label (`reward::ARMY_W`)
+*Sep 4, 2026 · REGISTERED, NOT YET RUN*
+
+Audit A2b, acted on. Every value label term read raw `tribe.score`
+(`reward::score_snapshot`) while training plays Domination, where the win
+condition is elimination. `score_predictiveness` measured unit count ~8pp
+better than score at predicting the winner at every turn from 6 to 24, and
+score *falling* in predictiveness after turn 18 while units and cities climb.
+The scoreboard prices a unit at cost x 5 and never discounts damage, so a
+Park (+250) outweighs an army and a wounded Giant is worth a fresh one.
+
+**Change:** `reward::progress(state, player)` = `score + ARMY_W x army_value`
+in Domination only, where `army_value` is the HP-weighted sum of
+`score::unit_score` over the tribe's units. `ARMY_W = 8.0` (`src/ai/reward.rs`)
+puts a mid-game army at rough parity with the rest of the scoreboard; 0.0
+restores the baseline label exactly. Every label site reads it: the self-play
+TD snapshot and its terminal (`GameResult.progress`, beside the untouched raw
+`scores` the replay and metrics report), the final-outcome tail
+(`outcome_for`), and the Gumbel edge reward. Non-Domination modes are
+unchanged, pinned by `reward::tests`.
+
+Baseline this is measured against: run `1788560256` (Sep 4, 2026, Vast A10,
+`--new-run -i 100 -l 10`, seeds as the loop pins them), the first campaign on
+the repaired instrument. Its full-cap readings vs greedy: 21.9% @40, 23.4% @50,
+21.9% @60, 14.1% @70, with training loss still falling — the loss/strength
+divergence A2b predicts.
+
+### Benchmark
+Same loop, same flags, same iteration count, `ARMY_W` the only change. Compare
+the full-cap gauge series (iterations 40+) against the baseline's, plus
+`value_r2_holdout` and the `units`/`captures` columns of `training_log.csv`.
+
+### Expected Results
+Full-cap readings above the baseline's 22% band by the 8pp the proxy measurement
+promised, with the plateau window not striking. Decisive-game share rises.
+
+### Falsifier
+Three consecutive full-cap readings at or below the baseline's band → REJECT and
+set `ARMY_W = 0.0`. If `value_r2_holdout` drops while the gauge holds, the
+weight is too high, not the idea wrong: halve it and re-run before rejecting.
+
+### Actual Results
+NOT YET RUN.
+
+
 ## Also landed Aug 18 — behaviour-affecting, not separately registered
 
 Correctness and integrity fixes with no free parameter to tune, listed so a

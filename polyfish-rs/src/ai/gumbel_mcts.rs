@@ -783,13 +783,13 @@ impl<'a> GumbelMctsAgent<'a> {
         // perspective) and how many turns it crossed.
         let candidate_node = root.children.get(cand_child_idx)?;
         let m = candidate_node.move_to_here.as_ref()?;
-        let (my_pre, opp_pre) = reward::score_snapshot(&game.state, root_player);
+        let (my_pre, opp_pre) = reward::progress_snapshot(&game.state, root_player);
         let turn_pre = game.state.settings.turn;
         let undo = game.simulate_move(m.as_ref())?;
         undos.push(undo);
         indices_stack.push(cand_child_idx);
         path_players.push(game.state.settings.current_player_turn_id);
-        let (my_post, opp_post) = reward::score_snapshot(&game.state, root_player);
+        let (my_post, opp_post) = reward::progress_snapshot(&game.state, root_player);
         let r = reward::normalized_reward(my_pre, opp_pre, my_post, opp_post);
         candidate_node.edge_reward.set(Some(r));
         path_rewards.push(r);
@@ -826,7 +826,7 @@ impl<'a> GumbelMctsAgent<'a> {
                 None => break,
             };
             let mover = game.state.settings.current_player_turn_id;
-            let (my_pre, opp_pre) = reward::score_snapshot(&game.state, mover);
+            let (my_pre, opp_pre) = reward::progress_snapshot(&game.state, mover);
             let turn_pre = game.state.settings.turn;
             let undo = match game.simulate_move(m.as_ref()) {
                 Some(u) => u,
@@ -835,7 +835,7 @@ impl<'a> GumbelMctsAgent<'a> {
             undos.push(undo);
             indices_stack.push(child_idx);
             path_players.push(game.state.settings.current_player_turn_id);
-            let (my_post, opp_post) = reward::score_snapshot(&game.state, mover);
+            let (my_post, opp_post) = reward::progress_snapshot(&game.state, mover);
             let r = reward::normalized_reward(my_pre, opp_pre, my_post, opp_post);
             child_node.edge_reward.set(Some(r));
             path_rewards.push(r);
